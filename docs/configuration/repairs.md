@@ -54,7 +54,8 @@ health checks.
 Health checks of plain video files no longer treat every missing Usenet segment as fatal.
 When a check covers **every** segment of an eligible file (files up to 8000 segments at any
 depth, or any file at **Complete** depth), InfiniDysk sweeps up all confirmed misses and
-classifies the damage instead of aborting on the first one:
+classifies the damage instead of aborting on the first one. With `repair.healthcheck-aging`
+enabled, releases old enough to be sampled are not classified.
 
 - **Healthy** — no confirmed holes. A segment whose primary article is gone but that is still
   fetchable through a fallback Message-Id counts as servable, not a hole.
@@ -69,7 +70,8 @@ classifies the damage instead of aborting on the first one:
 Eligible containers: `.mkv`, `.mk3d`, `.webm`, `.ts`, `.m2ts` (resync at cluster/packet
 boundaries) and `.mp4`/`.m4v`/`.mov`, whose layout is probed once from a bounded read of the
 file head: fast-start and fragmented MP4 can tolerate mid-stream holes, while **moov-at-end
-MP4 is fatal on any segment loss** because the moov atom lives in the file tail. Offset-
+MP4 is fatal on any segment loss** because the moov atom lives in the file tail — holes
+overlapping the moov atom region at the start of a fast-start MP4 are also fatal. Offset-
 sensitive formats (`.avi`, …) and non-payload files are never classified; they keep the
 legacy abort-on-first-miss behavior. A missing first segment is always fatal.
 

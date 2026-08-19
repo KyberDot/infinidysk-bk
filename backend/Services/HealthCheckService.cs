@@ -338,6 +338,7 @@ public class HealthCheckService : BackgroundService
             // still count toward coverage: they are served locally and can never be holes, so the
             // full-coverage test uses the sampled count, not the STAT count.
             var segmentRanges = nzbFile?.SegmentByteRanges;
+            // SegmentByteRanges is [NotMapped] and never materializes for legacy EF-fallback items, so a non-null value already implies FileBlobId != null.
             var canClassify = _configManager.IsDegradedToleranceEnabled()
                               && davItem.SubType == DavItem.ItemSubType.NzbFile
                               && FilenameUtil.IsDegradedToleranceEligible(davItem.Name)
@@ -576,7 +577,7 @@ public class HealthCheckService : BackgroundService
             return;
         }
 
-        var (containerClass, probedClass) = await ResolveContainerClassAsync(
+        var (containerClass, probedClass, criticalHeadEndExclusive) = await ResolveContainerClassAsync(
                 davItem, nzbFile, segments, holeIndices, ct)
             .ConfigureAwait(false);
         var caps = new SegmentDamageCaps(
@@ -584,14 +585,24 @@ public class HealthCheckService : BackgroundService
             _configManager.GetDegradedMaxTotalMissing(),
             _configManager.GetDegradedMaxMissingBytePercent());
         var exactSegmentSizes = segmentRanges.Select(range => range.Count).ToArray();
+        var segmentStarts = segmentRanges.Select(range => range.StartInclusive).ToArray();
         var verdict = SegmentDamageClassifier.Classify(
-            holeIndices, segments.Count, exactSegmentSizes, containerClass, caps, out var reason);
+            holeIndices, segments.Count, exactSegmentSizes, segmentStarts,
+            containerClass, caps, criticalHeadEndExclusive, out var reason);
+        long? probedExtent = probedClass != null ? criticalHeadEndExclusive : null;
 
         if (verdict == SegmentDamageVerdict.Failed)
         {
             Log.Information(
                 "Health check classified {Path} as failed: {Reason} Starting repair.",
                 davItem.Path, reason);
+            // Persist a fresh probe so a later check can reuse the class/extent without
+            // another BODY. Do not record holes: Failed is not a degraded keep-the-file
+            // verdict. Repair() commits the swapped FileBlobId with the health row.
+            if (probedClass != null)
+                await SwapNzbFileBlobAsync(
+                    davItem, nzbFile, nzbFile.MissingSegmentIndices, probedClass, probedExtent)
+                    .ConfigureAwait(false);
             // Seed the queue precheck with every confirmed miss so a re-grab of this release
             // fails fast pre-import (issue #732), then take today's repair path.
             if (FilenameUtil.IsImportantFileType(davItem.Name))
@@ -607,9 +618,12 @@ public class HealthCheckService : BackgroundService
         // not health, and real playback failures keep escalating toward auto-remove.
         var recordChanged = nzbFile.MissingSegmentIndices is not { } existing
                             || !existing.SequenceEqual(holeIndices)
-                            || (probedClass != null && nzbFile.ContainerClass != probedClass);
+                            || (probedClass != null && nzbFile.ContainerClass != probedClass)
+                            || (probedExtent != null && nzbFile.CriticalHeadEndExclusive != probedExtent);
         if (recordChanged)
-            await SwapNzbFileBlobAsync(davItem, nzbFile, holeIndices.ToArray(), probedClass).ConfigureAwait(false);
+            await SwapNzbFileBlobAsync(
+                    davItem, nzbFile, holeIndices.ToArray(), probedClass, probedExtent)
+                .ConfigureAwait(false);
 
         Log.Warning(
             "Health check classified {Path} as degraded: {Reason} Playback fills the gaps; repair skipped.",
@@ -631,23 +645,24 @@ public class HealthCheckService : BackgroundService
     /// file head (MP4 family only). Probe failures propagate to the caller's catches —
     /// no verdict is recorded this cycle and the probe is retried next time.
     /// </summary>
-    private async Task<(MediaContainerClass ContainerClass, byte? ProbedClass)> ResolveContainerClassAsync(
-        DavItem davItem,
-        DavNzbFile nzbFile,
-        List<string> segments,
-        List<int> holeIndices,
-        CancellationToken ct)
+    private async Task<(MediaContainerClass ContainerClass, byte? ProbedClass, long CriticalHeadEndExclusive)>
+        ResolveContainerClassAsync(
+            DavItem davItem,
+            DavNzbFile nzbFile,
+            List<string> segments,
+            List<int> holeIndices,
+            CancellationToken ct)
     {
         if (MediaContainerClassMapping.ByExtension(davItem.Name) is { } byExtension)
-            return (byExtension, null);
+            return (byExtension, null, 0);
 
         if (nzbFile.ContainerClass is byte persisted && Enum.IsDefined((MediaContainerClass)persisted))
-            return ((MediaContainerClass)persisted, null);
+            return ((MediaContainerClass)persisted, null, nzbFile.CriticalHeadEndExclusive ?? 0);
 
         // A hole at segment 0 fails classification regardless, and probing a missing
         // segment would just throw; never probe when the head is a hole.
         if (holeIndices[0] == 0)
-            return (MediaContainerClass.Unknown, null);
+            return (MediaContainerClass.Unknown, null, 0);
 
         // One bounded head read per file, ever: the probed class is persisted with the
         // hole record. Runs inside the caller's maintenance download context (attribution)
@@ -666,8 +681,8 @@ public class HealthCheckService : BackgroundService
                 filled += read;
             }
 
-            var probed = Mp4LayoutProbe.ClassifyMp4Head(buffer.AsSpan(0, filled));
-            return (probed, (byte)probed);
+            var (probed, extent) = Mp4LayoutProbe.ClassifyMp4Head(buffer.AsSpan(0, filled));
+            return (probed, (byte)probed, extent);
         }
     }
 
@@ -742,7 +757,8 @@ public class HealthCheckService : BackgroundService
         DavItem davItem,
         DavNzbFile nzbFile,
         int[]? missingSegmentIndices,
-        byte? probedContainerClass)
+        byte? probedContainerClass,
+        long? probedCriticalHeadEndExclusive = null)
     {
         var updated = new DavNzbFile
         {
@@ -752,6 +768,7 @@ public class HealthCheckService : BackgroundService
             SegmentFallbackIds = nzbFile.SegmentFallbackIds,
             MissingSegmentIndices = missingSegmentIndices,
             ContainerClass = probedContainerClass ?? nzbFile.ContainerClass,
+            CriticalHeadEndExclusive = probedCriticalHeadEndExclusive ?? nzbFile.CriticalHeadEndExclusive,
         };
         var newBlobId = Guid.NewGuid();
         await BlobStore.WriteBlob(newBlobId, updated).ConfigureAwait(false);

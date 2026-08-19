@@ -29,10 +29,18 @@ public static class SegmentDamageClassifier
         IReadOnlyList<int> missingIndices,
         int totalSegments,
         IReadOnlyList<long> exactSegmentSizes,
+        IReadOnlyList<long> segmentStartOffsets,
         MediaContainerClass containerClass,
         SegmentDamageCaps caps,
+        long criticalHeadEndExclusive,
         out string reason)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(totalSegments);
+        if (exactSegmentSizes.Count != totalSegments)
+            throw new ArgumentException("Segment size count must match totalSegments.", nameof(exactSegmentSizes));
+        if (segmentStartOffsets.Count != totalSegments)
+            throw new ArgumentException("Segment start offset count must match totalSegments.", nameof(segmentStartOffsets));
+
         var missingBytes = missingIndices.Sum(index => exactSegmentSizes[index]);
         var totalBytes = exactSegmentSizes.Sum();
         var bytePercent = totalBytes == 0 ? 100d : missingBytes * 100d / totalBytes;
@@ -43,6 +51,10 @@ public static class SegmentDamageClassifier
         if (containerClass is MediaContainerClass.Unknown or MediaContainerClass.Mp4MoovAtEnd)
             return SegmentDamageVerdict.Failed;
         if (missingIndices[0] == 0) return SegmentDamageVerdict.Failed;
+        if (containerClass == MediaContainerClass.Mp4FastStart
+            && criticalHeadEndExclusive > 0
+            && missingIndices.Any(index => segmentStartOffsets[index] < criticalHeadEndExclusive))
+            return SegmentDamageVerdict.Failed;
         if (longestRun > caps.MaxConsecutiveMissing) return SegmentDamageVerdict.Failed;
         if (missingIndices.Count > caps.MaxTotalMissing) return SegmentDamageVerdict.Failed;
         if (bytePercent > caps.MaxMissingBytePercent) return SegmentDamageVerdict.Failed;

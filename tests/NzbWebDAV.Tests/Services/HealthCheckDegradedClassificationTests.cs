@@ -356,7 +356,12 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         Assert.Equal(HealthCheckResult.HealthResult.Unhealthy, row.Result);
         Assert.Equal(HealthCheckResult.RepairAction.ActionNeeded, row.RepairStatus);
         Assert.Equal(1, fake.BodyRequestCounts.GetValueOrDefault(segments[0])); // probed once
-        Assert.Equal(oldBlobId, ReloadItem(item.Id).FileBlobId); // Failed writes no record
+        var afterProbe = ReloadItem(item.Id);
+        Assert.NotEqual(oldBlobId, afterProbe.FileBlobId); // Failed still persists the probe
+        var blob = await BlobStore.ReadBlob<DavNzbFile>(afterProbe.FileBlobId!.Value);
+        Assert.Null(blob!.MissingSegmentIndices);
+        Assert.Equal((byte)MediaContainerClass.Mp4MoovAtEnd, blob.ContainerClass);
+        Assert.Equal(0L, blob.CriticalHeadEndExclusive);
         Assert.Throws<UsenetArticleNotFoundException>(
             () => HealthCheckService.CheckCachedMissingSegmentIds([segments[5]]));
     }
@@ -381,6 +386,7 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         var firstBlob = await BlobStore.ReadBlob<DavNzbFile>(afterFirst.FileBlobId!.Value);
         Assert.Equal([4], firstBlob!.MissingSegmentIndices!);
         Assert.Equal((byte)MediaContainerClass.Mp4FastStart, firstBlob.ContainerClass);
+        Assert.Equal(56, firstBlob.CriticalHeadEndExclusive);
         Assert.Equal(1, fake.BodyRequestCounts.GetValueOrDefault(segments[0]));
 
         // Second check with identical holes: persisted class is reused (no second BODY)
@@ -390,6 +396,44 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         Assert.Equal(2, GetHealthRows(item.Id).Count);
         Assert.Equal(1, fake.BodyRequestCounts.GetValueOrDefault(segments[0]));
         Assert.Equal(afterFirst.FileBlobId, ReloadItem(item.Id).FileBlobId);
+    }
+
+    [Fact]
+    public async Task FastStartMp4_HoleOverlappingMoov_FailsAndReusesPersistedExtentWithoutSecondBody()
+    {
+        var segments = NewSegmentIds(6);
+        // Segment 1 is tiny so the hole stays inside the byte-share cap; the fail
+        // must come from overlapping the moov, not from MaxMissingBytePercent.
+        var sizes = new long[] { 10_000, 50, 10_000, 10_000, 10_000, 10_000 };
+        var (item, oldBlobId) = await AddVideoFileAsync("movie.mp4", segments, sizes);
+        var fake = NewFakeClient(segments, missing: [1]);
+        // ftyp (24 bytes) + moov declared 15_000 → exclusive end 15_024, which
+        // overlaps segment 1 (starts at 10_000). The header is in segment 0.
+        fake.Serve(segments[0], Mp4Head(Box("ftyp", 16), BoxHeader("moov", 15_000)));
+        var (service, _) = await NewServiceAsync(fake, par2Outcome: false);
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        var row = Assert.Single(GetHealthRows(item.Id));
+        Assert.Equal(HealthCheckResult.HealthResult.Unhealthy, row.Result);
+        Assert.Equal(HealthCheckResult.RepairAction.ActionNeeded, row.RepairStatus);
+        Assert.Equal(1, fake.BodyRequestCounts.GetValueOrDefault(segments[0]));
+        var afterFirst = ReloadItem(item.Id);
+        Assert.NotEqual(oldBlobId, afterFirst.FileBlobId);
+        var firstBlob = await BlobStore.ReadBlob<DavNzbFile>(afterFirst.FileBlobId!.Value);
+        Assert.Null(firstBlob!.MissingSegmentIndices);
+        Assert.Equal((byte)MediaContainerClass.Mp4FastStart, firstBlob.ContainerClass);
+        Assert.Equal(15_024, firstBlob.CriticalHeadEndExclusive);
+        Assert.Throws<UsenetArticleNotFoundException>(
+            () => HealthCheckService.CheckCachedMissingSegmentIds([segments[1]]));
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        Assert.Equal(2, GetHealthRows(item.Id).Count);
+        Assert.All(
+            GetHealthRows(item.Id),
+            result => Assert.Equal(HealthCheckResult.HealthResult.Unhealthy, result.Result));
+        Assert.Equal(1, fake.BodyRequestCounts.GetValueOrDefault(segments[0]));
     }
 
     [Fact]
@@ -420,6 +464,7 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         var blob = await BlobStore.ReadBlob<DavNzbFile>(afterSecond.FileBlobId!.Value);
         Assert.Null(blob!.MissingSegmentIndices);
         Assert.Equal((byte)MediaContainerClass.Mp4FastStart, blob.ContainerClass); // survives clears
+        Assert.Equal(56, blob.CriticalHeadEndExclusive);
         Assert.Contains(_context.BlobCleanupItems.AsNoTracking().ToList(), x => x.Id == afterFirst.FileBlobId);
     }
 
@@ -480,7 +525,8 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         long[] segmentSizes,
         string[][]? fallbackIds = null,
         int[]? preExistingHoles = null,
-        byte? containerClass = null)
+        byte? containerClass = null,
+        long? criticalHeadEndExclusive = null)
     {
         var itemId = Guid.NewGuid();
         var ranges = new LongRange[segmentSizes.Length];
@@ -500,6 +546,7 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
             SegmentFallbackIds = fallbackIds,
             MissingSegmentIndices = preExistingHoles,
             ContainerClass = containerClass,
+            CriticalHeadEndExclusive = criticalHeadEndExclusive,
         });
 
         var item = DavItem.New(
@@ -549,6 +596,14 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
     {
         var bytes = new byte[8 + payloadSize];
         BinaryPrimitives.WriteUInt32BigEndian(bytes, (uint)(8 + payloadSize));
+        Encoding.ASCII.GetBytes(type).CopyTo(bytes, 4);
+        return bytes;
+    }
+
+    private static byte[] BoxHeader(string type, uint declaredSize)
+    {
+        var bytes = new byte[8];
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, declaredSize);
         Encoding.ASCII.GetBytes(type).CopyTo(bytes, 4);
         return bytes;
     }

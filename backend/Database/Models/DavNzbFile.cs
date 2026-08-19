@@ -44,6 +44,15 @@ public partial class DavNzbFile
     [MemoryPackOrder(5)]
     public byte? ContainerClass { get; set; }
 
+    /// <summary>
+    /// Exclusive end offset of the moov atom for a probed fast-start MP4. Null = not probed
+    /// or not applicable (non-MP4, moov-at-end, fragmented, or an insane declared size).
+    /// Blob/MemoryPack only — not an EF column.
+    /// </summary>
+    [NotMapped]
+    [MemoryPackOrder(6)]
+    public long? CriticalHeadEndExclusive { get; set; }
+
     // navigation helpers
     [MemoryPackIgnore]
     public DavItem? DavItem { get; set; }
