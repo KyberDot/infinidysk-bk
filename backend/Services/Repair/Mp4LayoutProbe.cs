@@ -37,12 +37,18 @@ public static class Mp4LayoutProbe
                 return MediaContainerClass.Unknown;
             }
 
-            if (boxSize > (ulong)(head.Length - offset))
-                return type == "moov" ? MediaContainerClass.Mp4FastStart : MediaContainerClass.Unknown;
-
+            // Decision points trigger on sight, regardless of the declared payload size
+            // (mdat's size is the media payload — typically far beyond the probed span).
             if (type == "mdat")
                 return sawMoov ? MediaContainerClass.Mp4FastStart : MediaContainerClass.Mp4MoovAtEnd;
             if (type == "moof") return MediaContainerClass.ResyncTolerant;
+
+            if (boxSize > (ulong)(head.Length - offset))
+                // A moov we cannot see past still classifies: fMP4 init moovs are small, so
+                // a moov spanning past the span means faststart. A skipped box (ftyp, free,
+                // uuid, …) beyond the span leaves the layout unclassifiable.
+                return type == "moov" ? MediaContainerClass.Mp4FastStart : MediaContainerClass.Unknown;
+
             if (type == "moov") sawMoov = true;
 
             offset += checked((int)boxSize);
