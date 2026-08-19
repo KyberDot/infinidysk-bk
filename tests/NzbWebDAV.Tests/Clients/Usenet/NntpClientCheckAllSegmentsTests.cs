@@ -169,6 +169,32 @@ public class NntpClientCheckAllSegmentsTests
         Assert.Equal([1, 2, 2, 2, 3], reports);
     }
 
+    [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_CollectsConfirmedMissesInInputOrder()
+    {
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: [false, true, false],
+            recheckCodes: [430, 223]);
+
+        var missing = await client.CollectMissingSegmentsPipelinedAsync(
+            ["a@example", "b@example", "c@example"], 8, 2, null, CancellationToken.None);
+
+        Assert.Equal(["a@example"], missing);
+        Assert.Equal(["a@example", "c@example"], client.RecheckedSegmentIds);
+    }
+
+    [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_NonDefinitiveRecheckThrows()
+    {
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: [false],
+            recheckCodes: [400]);
+
+        await Assert.ThrowsAsync<UsenetUnexpectedResponseException>(() =>
+            client.CollectMissingSegmentsPipelinedAsync(
+                ["a@example"], 8, 1, null, CancellationToken.None));
+    }
+
     private sealed class CollectingProgress(List<int> reports) : IProgress<int>
     {
         public void Report(int value) => reports.Add(value);
@@ -259,8 +285,17 @@ public class NntpClientCheckAllSegmentsTests
             throw new NotSupportedException();
 
         public override Task<UsenetStatResponse> StatAsync(
-            SegmentId segmentId, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            SegmentId segmentId, CancellationToken cancellationToken)
+        {
+            RecheckedSegmentIds.Add(segmentId);
+            var code = recheckCodes[_recheckIndex++];
+            return Task.FromResult(new UsenetStatResponse
+            {
+                ResponseCode = code,
+                ResponseMessage = $"{code} <{segmentId}>",
+                ArticleExists = code == (int)UsenetResponseType.ArticleExists,
+            });
+        }
 
         public override Task<UsenetHeadResponse> HeadAsync(
             SegmentId segmentId, CancellationToken cancellationToken) =>
