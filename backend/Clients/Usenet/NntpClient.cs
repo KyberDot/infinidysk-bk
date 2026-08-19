@@ -615,7 +615,11 @@ public abstract class NntpClient : INntpClient
                 e,
                 "Pipelined STAT sweep failed; collecting with concurrent STAT fallback for {Total} segments",
                 segmentIds.Count);
-            return await CollectMissingSegmentsAsync(segmentIds, fallbackConcurrency, progress, cancellationToken)
+            var fallbackProgress = progress == null
+                ? null
+                : new MappedProgress(progress, n => Math.Max(processed, n));
+            return await CollectMissingSegmentsAsync(
+                    segmentIds, fallbackConcurrency, fallbackProgress, cancellationToken)
                 .ConfigureAwait(false);
         }
 

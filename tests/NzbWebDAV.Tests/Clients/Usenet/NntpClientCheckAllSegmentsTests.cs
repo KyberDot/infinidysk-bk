@@ -170,6 +170,26 @@ public class NntpClientCheckAllSegmentsTests
     }
 
     [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_SweepThrowsAfterProgress_FallbackProgressIsMonotonic()
+    {
+        var reports = new List<int>();
+        var progress = new CollectingProgress(reports);
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: [true, true, true],
+            recheckCodes: [223, 223, 223],
+            sweepException: new UsenetProtocolException("connection closed mid-sweep"),
+            throwAfterYieldCount: 2);
+
+        var missing = await client.CollectMissingSegmentsPipelinedAsync(
+            ["a@example", "b@example", "c@example"], 8, 2, progress, CancellationToken.None);
+
+        Assert.Empty(missing);
+        Assert.Equal(["a@example", "b@example", "c@example"], client.RecheckedSegmentIds);
+        // Pipelined reports 1,2 then throw; fallback clamps so n=1,2 stay at 2 before advancing to 3.
+        Assert.Equal([1, 2, 2, 2, 3], reports);
+    }
+
+    [Fact]
     public async Task CollectMissingSegmentsPipelinedAsync_CollectsConfirmedMissesInInputOrder()
     {
         var client = new TrackingPipelinedStatClient(
