@@ -195,6 +195,53 @@ public class NntpClientCheckAllSegmentsTests
                 ["a@example"], 8, 1, null, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_WithAllExists_ReturnsEmptyWithoutRecheck()
+    {
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: [true, true],
+            recheckCodes: []);
+
+        var missing = await client.CollectMissingSegmentsPipelinedAsync(
+            ["a@example", "b@example"], 8, 2, null, CancellationToken.None);
+
+        Assert.Empty(missing);
+        Assert.Empty(client.RecheckedSegmentIds);
+        Assert.Equal(0, client.CheckAllSegmentsCallCount);
+    }
+
+    [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_WithEmptyInput_ReturnsEmpty()
+    {
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: [],
+            recheckCodes: []);
+
+        var missing = await client.CollectMissingSegmentsPipelinedAsync(
+            [], 8, 2, null, CancellationToken.None);
+
+        Assert.Empty(missing);
+        Assert.Equal(0, client.PipelinedStatsCallCount);
+    }
+
+    [Fact]
+    public async Task CollectMissingSegmentsPipelinedAsync_SweepThrows_CollectingFallbackReturnsFullSet()
+    {
+        var client = new TrackingPipelinedStatClient(
+            pipelinedExists: null,
+            recheckCodes: [430, 223, 430],
+            sweepException: new UsenetProtocolException("connection closed mid-sweep"));
+
+        var missing = await client.CollectMissingSegmentsPipelinedAsync(
+            ["a@example", "b@example", "c@example"], 8, 2, null, CancellationToken.None);
+
+        // The collecting fallback STATs every segment concurrently (not just a partial
+        // sweep's misses) and returns the full confirmed set in input order.
+        Assert.Equal(["a@example", "c@example"], missing);
+        Assert.Equal(["a@example", "b@example", "c@example"], client.RecheckedSegmentIds);
+        Assert.Equal(0, client.CheckAllSegmentsCallCount);
+    }
+
     private sealed class CollectingProgress(List<int> reports) : IProgress<int>
     {
         public void Report(int value) => reports.Add(value);
