@@ -26,6 +26,24 @@ public partial class DavNzbFile
     [MemoryPackOrder(3)]
     public string[][]? SegmentFallbackIds { get; set; }
 
+    /// <summary>
+    /// Segment indices confirmed missing on all providers and all fallback MessageIds
+    /// by a full-coverage health sweep (ascending, absolute). Null = no degraded record.
+    /// Blob/MemoryPack only — not an EF column.
+    /// </summary>
+    [NotMapped]
+    [MemoryPackOrder(4)]
+    public int[]? MissingSegmentIndices { get; set; }
+
+    /// <summary>
+    /// The probed media container class (MediaContainerClass as byte), persisted after the
+    /// first successful head probe so a file is probed at most once. Null = never probed.
+    /// Blob/MemoryPack only — not an EF column.
+    /// </summary>
+    [NotMapped]
+    [MemoryPackOrder(5)]
+    public byte? ContainerClass { get; set; }
+
     // navigation helpers
     [MemoryPackIgnore]
     public DavItem? DavItem { get; set; }

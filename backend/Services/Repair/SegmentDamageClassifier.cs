@@ -65,3 +65,28 @@ public static class SegmentDamageClassifier
         return longestRun;
     }
 }
+
+public static class MediaContainerClassMapping
+{
+    /// <summary>
+    /// The container class fixed by the file extension, or null for the MP4 family
+    /// (.mp4/.m4v/.mov), whose layout (faststart / moov-at-end / fragmented) must be
+    /// probed from the file head. Only meaningful for
+    /// <see cref="Utils.FilenameUtil.IsDegradedToleranceEligible"/> files.
+    /// </summary>
+    public static MediaContainerClass? ByExtension(string filename) =>
+        Path.GetExtension(filename).ToLowerInvariant() switch
+        {
+            ".mkv" or ".mk3d" or ".webm" or ".ts" or ".m2ts" => MediaContainerClass.ResyncTolerant,
+            _ => null,
+        };
+
+    /// <summary>Human-readable container phrase for health-result messages.</summary>
+    public static string Describe(MediaContainerClass containerClass) => containerClass switch
+    {
+        MediaContainerClass.ResyncTolerant => "a resync-tolerant container",
+        MediaContainerClass.Mp4FastStart => "a fast-start MP4 container",
+        MediaContainerClass.Mp4MoovAtEnd => "an MP4 container with the moov atom at the end",
+        _ => "an unrecognized container",
+    };
+}
