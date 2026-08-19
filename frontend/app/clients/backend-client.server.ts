@@ -301,6 +301,7 @@ class BackendClient {
         if (params.page !== undefined) qs.set("page", String(params.page));
         if (params.pageSize !== undefined) qs.set("pageSize", String(params.pageSize));
         if (params.repairStatus) qs.set("repairStatus", params.repairStatus);
+        if (params.result) qs.set("result", params.result);
         const query = qs.toString();
         return await call<HealthCheckHistoryResponse>(`/api/get-health-check-history${query ? `?${query}` : ""}`, "Failed to get health check history", {
             method: "GET",
@@ -624,6 +625,7 @@ export type GetHealthCheckHistoryParams = {
     page?: number,
     pageSize?: number,
     repairStatus?: string,
+    result?: string,
 }
 
 export type HealthCheckStats = {
@@ -647,6 +649,7 @@ export type HealthCheckResult = {
 export enum HealthResult {
     Healthy = 0,
     Unhealthy = 1,
+    Degraded = 2,
 }
 
 export enum RepairAction {
