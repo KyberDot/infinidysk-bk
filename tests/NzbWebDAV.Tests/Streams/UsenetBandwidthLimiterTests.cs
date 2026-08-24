@@ -36,8 +36,10 @@ public class UsenetBandwidthLimiterTests
         var task = limiter.AcquireAsync(64 * 1024, CancellationToken.None).AsTask();
         Assert.False(task.IsCompleted);
 
+        var started = time.Now;
         await PumpUntilCompleted(task, time, TimeSpan.FromSeconds(10));
         Assert.Equal(64 * 1024, limiter.TotalChargedBytes);
+        Assert.True(time.Now - started >= MinElapsed(64 * 1024, 10_000, consumeBurst: true));
     }
 
     [Fact]
@@ -51,8 +53,10 @@ public class UsenetBandwidthLimiterTests
         var waiting = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
         Assert.False(waiting.IsCompleted);
 
+        var started = time.Now;
         await PumpUntilCompleted(waiting, time, TimeSpan.FromSeconds(2));
         Assert.Equal(Burst(10_000) + 10_000, limiter.TotalChargedBytes);
+        Assert.True(time.Now - started >= MinElapsed(10_000, 10_000, consumeBurst: false));
     }
 
     [Fact]
@@ -65,8 +69,10 @@ public class UsenetBandwidthLimiterTests
         var first = limiter.AcquireAsync(200_000, CancellationToken.None).AsTask();
         Assert.False(first.IsCompleted);
 
+        var started = time.Now;
         await PumpUntilCompleted(first, time, TimeSpan.FromSeconds(25));
         Assert.Equal(200_000, limiter.TotalChargedBytes);
+        Assert.True(time.Now - started >= MinElapsed(200_000, 10_000, consumeBurst: true));
 
         var waiting = limiter.AcquireAsync(1, CancellationToken.None).AsTask();
         Assert.False(waiting.IsCompleted);
@@ -144,6 +150,14 @@ public class UsenetBandwidthLimiterTests
     }
 
     private static int Burst(long bytesPerSecond) => (int)Math.Max(1, bytesPerSecond * 0.25);
+
+    private static TimeSpan MinElapsed(int requestedBytes, long bytesPerSecond, bool consumeBurst)
+    {
+        var remaining = consumeBurst
+            ? Math.Max(0, requestedBytes - Burst(bytesPerSecond))
+            : requestedBytes;
+        return TimeSpan.FromSeconds(remaining / (double)bytesPerSecond);
+    }
 
     private static async Task PumpUntilCompleted(Task task, ControllableTimeProvider time, TimeSpan max)
     {
