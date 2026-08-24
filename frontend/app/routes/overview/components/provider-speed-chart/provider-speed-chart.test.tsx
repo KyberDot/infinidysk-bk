@@ -52,5 +52,6 @@ describe("ProviderSpeedChart", () => {
     expect(xs.length).toBeGreaterThan(0);
     expect(Math.min(...xs)).toBeGreaterThanOrEqual(0);
     expect(Math.max(...xs)).toBeLessThanOrEqual(800);
+    expect(Math.min(...xs)).toBeLessThan(800);
   });
 });
