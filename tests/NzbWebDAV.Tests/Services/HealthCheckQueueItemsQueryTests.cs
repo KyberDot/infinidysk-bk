@@ -66,6 +66,24 @@ public sealed class HealthCheckQueueItemsQueryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Query_IncludesHistoryLinkedPendingRepairs()
+    {
+        var historyId = Guid.NewGuid();
+        var deferredUntil = DateTimeOffset.UtcNow.AddHours(3);
+        var pending = NewUsenetFile("history-linked-pending-repair.mkv", historyId, deferredUntil);
+        pending.HealthRepairPending = true;
+        _context.Items.Add(pending);
+        await _context.SaveChangesAsync();
+        _context.ChangeTracker.Clear();
+
+        var ids = await HealthCheckService.GetHealthCheckQueueItemsQuery(_dbClient)
+            .Select(x => x.Id)
+            .ToListAsync();
+
+        Assert.Contains(pending.Id, ids);
+    }
+
+    [Fact]
     public async Task CallerSideFilter_SkipsNonMediaFiles_ButKeepsUrgent()
     {
         var scheduledAt = DateTimeOffset.UtcNow.AddHours(-1);

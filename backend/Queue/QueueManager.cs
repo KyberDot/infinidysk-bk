@@ -625,6 +625,22 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                     break;
                 }
 
+                if (IsNewWorkBlocked())
+                {
+                    if (queueNzbStream is not null)
+                    {
+                        await queueNzbStream.DisposeAsync().ConfigureAwait(false);
+                        queueNzbStream = null;
+                    }
+                    if (dbContext is not null)
+                    {
+                        await dbContext.DisposeAsync().ConfigureAwait(false);
+                        dbContext = null;
+                        dbClient = null;
+                    }
+                    return false;
+                }
+
                 // Own a dedicated DB context for this worker (may already be
                 // created above when claiming from the database).
                 if (dbContext is null)

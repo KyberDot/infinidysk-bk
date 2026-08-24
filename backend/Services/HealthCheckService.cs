@@ -184,7 +184,10 @@ public class HealthCheckService : BackgroundService
                 // Urgent repairs (UnixEpoch sentinel) always run regardless of file type.
                 DavItem? davItem = null;
                 await foreach (var item in GetHealthCheckQueueItems(dbClient)
-                    .Where(x => x.NextHealthCheck == null || x.NextHealthCheck < currentDateTime)
+                    .Where(x =>
+                        x.NextHealthCheck == null
+                        || x.NextHealthCheck < currentDateTime
+                        || (admission.RepairsOpen && x.HealthRepairPending))
                     .AsAsyncEnumerable()
                     .WithCancellation(cts.Token)
                     .ConfigureAwait(false))
@@ -257,7 +260,8 @@ public class HealthCheckService : BackgroundService
             .Where(x => x.Type == DavItem.ItemType.UsenetFile)
             .Where(x =>
                 x.HistoryItemId == null ||
-                x.NextHealthCheck == DateTimeOffset.UnixEpoch);
+                x.NextHealthCheck == DateTimeOffset.UnixEpoch ||
+                x.HealthRepairPending);
     }
 
     private DavDatabaseContext CreateContext() =>

@@ -22,16 +22,8 @@ public class WeeklyWindowEvaluatorTests
     {
         foreach (var id in new[] { "America/New_York", "Eastern Standard Time" })
         {
-            try
-            {
-                return TimeZoneInfo.FindSystemTimeZoneById(id);
-            }
-            catch (TimeZoneNotFoundException)
-            {
-            }
-            catch (InvalidTimeZoneException)
-            {
-            }
+            if (TimeZoneInfo.TryFindSystemTimeZoneById(id, out var timeZone))
+                return timeZone;
         }
 
         throw new InvalidOperationException("Eastern timezone is not available on this host.");

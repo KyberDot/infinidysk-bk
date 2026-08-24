@@ -46,7 +46,11 @@ export function parseWeeklyWindowSchedule(
     return { ok: false, error: "Schedule JSON must be an object." };
   }
   const record = raw as Record<string, unknown>;
-  const enabled = Boolean(record["Enabled"] ?? record["enabled"]);
+  const enabledRaw = record["Enabled"] ?? record["enabled"];
+  if (enabledRaw !== undefined && typeof enabledRaw !== "boolean") {
+    return { ok: false, error: "Enabled must be a boolean." };
+  }
+  const enabled = enabledRaw ?? false;
   const windowsRaw = record["Windows"] ?? record["windows"];
   if (windowsRaw == null) {
     return enabled

@@ -1,4 +1,5 @@
-﻿using System.Globalization;
+﻿using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -17,6 +18,8 @@ namespace NzbWebDAV.Config;
 public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
 {
     public static readonly string AppVersion = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_VERSION") ?? "0.0.0";
+
+    private readonly ConcurrentDictionary<string, string> _invalidScheduleWarnings = new();
 
     /// <summary>
     /// New config keys that inherit persisted or env values from a legacy name when unset.
@@ -962,8 +965,15 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
         var raw = StringUtil.EmptyToNull(GetConfigValue(key));
         if (raw is null) return WeeklyWindowSchedule.Unrestricted;
         if (WeeklyWindowSchedule.TryParse(raw, out var schedule, out var error))
+        {
+            _invalidScheduleWarnings.TryRemove(key, out _);
             return schedule;
-        Log.Warning("Ignoring invalid {ConfigKey} schedule. Reason: {Reason}", key, error);
+        }
+        if (!_invalidScheduleWarnings.TryGetValue(key, out var lastRaw) || lastRaw != raw)
+        {
+            _invalidScheduleWarnings[key] = raw;
+            Log.Warning("Ignoring invalid {ConfigKey} schedule. Reason: {Reason}", key, error);
+        }
         return WeeklyWindowSchedule.Unrestricted;
     }
 

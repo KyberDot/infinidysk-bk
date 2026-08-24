@@ -12,12 +12,9 @@ public class HealthWorkSchedulePolicyTests
     [Fact]
     public void ManualRun_OpensChecksOnly()
     {
-        var local = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.Local);
-        var minute = local.Hour * 60 + local.Minute;
-        var start = (minute + 180) % 1440;
-        var end = (start + 30) % 1440;
-        if (end == start) end = (start + 1) % 1440;
-        var closed = $$"""{"Enabled":true,"Windows":[{"Days":[0,1,2,3,4,5,6],"StartMinute":{{start}},"EndMinute":{{end}}}]}""";
+        var utcNow = new DateTimeOffset(2026, 8, 24, 12, 0, 0, TimeSpan.Zero);
+        const string closed =
+            """{"Enabled":true,"Windows":[{"Days":[1],"StartMinute":600,"EndMinute":630}]}""";
         var config = new ConfigManager();
         config.UpdateValues(new List<ConfigItem>
         {
@@ -25,19 +22,19 @@ public class HealthWorkSchedulePolicyTests
             Item(ConfigKeys.RepairActionSchedule, closed),
         });
         var policy = new HealthWorkSchedulePolicy(config);
-        var before = policy.Evaluate(DateTimeOffset.UtcNow);
+        var before = policy.Evaluate(utcNow, TimeZoneInfo.Utc);
         Assert.False(before.ChecksOpen);
         Assert.False(before.RepairsOpen);
 
         Assert.False(policy.BeginManualRun());
-        var during = policy.Evaluate(DateTimeOffset.UtcNow);
+        var during = policy.Evaluate(utcNow, TimeZoneInfo.Utc);
         Assert.True(during.ChecksOpen);
         Assert.False(during.RepairsOpen);
         Assert.True(during.ManualRunActive);
 
         Assert.True(policy.BeginManualRun());
         policy.EndManualRun();
-        var after = policy.Evaluate(DateTimeOffset.UtcNow);
+        var after = policy.Evaluate(utcNow, TimeZoneInfo.Utc);
         Assert.False(after.ChecksOpen);
         Assert.False(after.ManualRunActive);
     }

@@ -122,6 +122,15 @@ export default function Queue(props: Route.ComponentProps) {
     setTotalQueueCount(props.loaderData.totalQueueCount);
   }, [props.loaderData.totalQueueCount]);
   useEffect(() => {
+    const seconds = Number(props.loaderData.pauseInt);
+    if (!props.loaderData.paused || !Number.isFinite(seconds) || seconds <= 0) return;
+    const handle = window.setTimeout(() => {
+      void revalidator.revalidate();
+    }, Math.min(seconds, 86_400) * 1000);
+    return () => window.clearTimeout(handle);
+  }, [props.loaderData.paused, props.loaderData.pauseInt, revalidator]);
+
+  useEffect(() => {
     setTotalHistoryCount(props.loaderData.totalHistoryCount);
   }, [props.loaderData.totalHistoryCount]);
 

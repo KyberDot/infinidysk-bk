@@ -25,6 +25,14 @@ describe("weekly window schedule JSON", () => {
     );
   });
 
+  it("rejects non-boolean Enabled values", () => {
+    expect(
+      isWeeklyWindowScheduleJsonValid(
+        JSON.stringify({ Enabled: "false", Windows: [{ Days: [1], StartMinute: 0, EndMinute: 60 }] }),
+      ),
+    ).toBe(false);
+  });
+
   it("round-trips enabled schedules and serializes disabled to empty", () => {
     const parsed = parseWeeklyWindowSchedule(
       JSON.stringify({

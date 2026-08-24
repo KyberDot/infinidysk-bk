@@ -267,6 +267,30 @@
           "fileName"
         ],
         "type": "object"
+      },
+      "TriggerHealthCheckResponse": {
+        "description": "Accepted response for POST /api/trigger-health-check.",
+        "properties": {
+          "alreadyRunning": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "queuedCount": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "status": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "alreadyRunning",
+          "queuedCount",
+          "status"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -8559,8 +8583,15 @@
       "post": {
         "operationId": "post-api-trigger-health-check",
         "responses": {
-          "200": {
-            "description": "OK"
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerHealthCheckResponse"
+                }
+              }
+            },
+            "description": "Accepted. The health-check run was queued."
           },
           "400": {
             "content": {
