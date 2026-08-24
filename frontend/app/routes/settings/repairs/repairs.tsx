@@ -613,9 +613,7 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
               <WeeklyWindowEditor
                 id="repair-action-schedule"
                 value={config["repair.action-schedule"] ?? ""}
-                onChange={(next) =>
-                  setNewConfig({ ...config, "repair.action-schedule": next })
-                }
+                onChange={(next) => setNewConfig({ ...config, "repair.action-schedule": next })}
                 description="When closed, confirmed damage is deferred until the next repair window instead of replacing or reconstructing immediately."
               />
             </div>

@@ -2036,21 +2036,36 @@ public class HealthCheckService : BackgroundService
     {
         var now = DateTimeOffset.UtcNow;
         var admission = _healthWorkSchedule?.Evaluate(now);
+        var scheduledResume = admission?.NextRepairsChange ?? now + TimeSpan.FromDays(1);
         davItem.HealthRepairPending = true;
         davItem.LastHealthCheck = now;
-        davItem.NextHealthCheck = admission?.NextRepairsChange ?? now + TimeSpan.FromDays(1);
+        // Keep the UnixEpoch urgent sentinel. Replacing it with the window time would
+        // send the item through STAT on resume, and STAT can pass after BODY failed.
+        davItem.NextHealthCheck = NextHealthCheckAfterScheduleDeferral(
+            davItem.NextHealthCheck, scheduledResume);
         Log.Warning(
             "Repair deferred by schedule for {Path}. Next repair window opens {NextChange}.",
             davItem.Path,
-            davItem.NextHealthCheck);
+            scheduledResume);
         await RecordHealthResult(
             dbClient,
             davItem,
             HealthCheckResult.HealthResult.Unhealthy,
             HealthCheckResult.RepairAction.ActionNeeded,
-            $"Repair deferred by the repair schedule. Next repair window opens {davItem.NextHealthCheck:u}.",
+            $"Repair deferred by the repair schedule. Next repair window opens {scheduledResume:u}.",
             ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Playback-triggered urgent repairs use <see cref="DateTimeOffset.UnixEpoch"/> so the
+    /// next admission skips STAT. Schedule deferral must not replace that sentinel.
+    /// </summary>
+    internal static DateTimeOffset NextHealthCheckAfterScheduleDeferral(
+        DateTimeOffset? currentNextHealthCheck,
+        DateTimeOffset scheduledResume) =>
+        currentNextHealthCheck == DateTimeOffset.UnixEpoch
+            ? DateTimeOffset.UnixEpoch
+            : scheduledResume;
 
     private async Task RecordHealthResult
     (

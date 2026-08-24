@@ -36,7 +36,11 @@ import {
 import { isMaintenanceSettingsUpdated, Maintenance } from "./maintenance/maintenance";
 import { isBackupSettingsUpdated, BackupSettings } from "./backup/backup";
 import { Migration } from "./migration/migration";
-import { isRepairsSettingsUpdated, isRepairsSettingsValid, RepairsSettings } from "./repairs/repairs";
+import {
+  isRepairsSettingsUpdated,
+  isRepairsSettingsValid,
+  RepairsSettings,
+} from "./repairs/repairs";
 import { isWatchdogSettingsUpdated, WatchdogSettings } from "./watchdog/watchdog";
 import { isPreflightSettingsUpdated, PreflightSettings } from "./preflight/preflight";
 import { isWatchtowerSettingsUpdated, WatchtowerSettings } from "./watchtower/watchtower";

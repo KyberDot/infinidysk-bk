@@ -543,9 +543,9 @@ export function StreamingSettings({ config, setNewConfig }: StreamingSettingsPro
               className="text-[11px] leading-relaxed text-base-content/45"
               id="bandwidth-limit-help"
             >
-              Caps total download from all providers. 1 MB/s = 8 Mbit/s. Applies to queue
-              downloads and streaming. Cache hits and LAN delivery are never limited. Leave
-              empty or 0 for unlimited.
+              Caps total download from all providers. 1 MB/s = 8 Mbit/s. Applies to queue downloads
+              and streaming. Cache hits and LAN delivery are never limited. Leave empty or 0 for
+              unlimited.
             </p>
             {showLowLimitWarning && (
               <Alert className="alert-soft items-start text-xs" variant="warning">

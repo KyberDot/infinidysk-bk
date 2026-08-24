@@ -39,16 +39,9 @@ public static class WeeklyWindowEvaluator
         var local = TimeZoneInfo.ConvertTime(utcNow, timeZone);
         var day = (int)local.DayOfWeek;
         var minute = local.Hour * 60 + local.Minute;
-        foreach (var window in windows)
-        {
-            foreach (var startDay in window.Days.Distinct())
-            {
-                if (Contains(startDay, window.StartMinute, window.EndMinute, day, minute))
-                    return true;
-            }
-        }
-
-        return false;
+        return windows.Any(window =>
+            window.Days.Distinct().Any(startDay =>
+                Contains(startDay, window.StartMinute, window.EndMinute, day, minute)));
     }
 
     private static bool Contains(int startDay, int startMinute, int endMinute, int day, int minute)

@@ -76,4 +76,23 @@ public class WeeklyWindowScheduleTests
         Assert.NotEqual("0", config.GetQueuePauseInt());
         Assert.True(int.Parse(config.GetQueuePauseInt()) > 0);
     }
+
+    [Fact]
+    public void GetQueuePauseInt_RoundsUpToNextChange()
+    {
+        var tz = TimeZoneInfo.Local;
+        var localWall = new DateTime(2026, 8, 24, 8, 59, 49, 200, DateTimeKind.Unspecified);
+        var utcNow = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localWall, tz));
+        const string json =
+            """{"Enabled":true,"Windows":[{"Days":[1],"StartMinute":540,"EndMinute":1020}]}""";
+        var config = new ConfigManager();
+        config.UpdateValues(new List<ConfigItem>
+        {
+            Item(ConfigKeys.QueuePaused, "false"),
+            Item(ConfigKeys.QueueProcessingSchedule, json),
+        });
+
+        Assert.True(config.IsQueueEffectivelyPaused(utcNow));
+        Assert.Equal("11", config.GetQueuePauseInt(utcNow));
+    }
 }

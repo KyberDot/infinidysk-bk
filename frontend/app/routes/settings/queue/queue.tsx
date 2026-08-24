@@ -193,9 +193,7 @@ export function QueueSettings({ config, setNewConfig }: QueueSettingsProps) {
             <WeeklyWindowEditor
               id="queue-processing-schedule"
               value={config["queue.processing-schedule"] ?? ""}
-              onChange={(next) =>
-                setNewConfig({ ...config, "queue.processing-schedule": next })
-              }
+              onChange={(next) => setNewConfig({ ...config, "queue.processing-schedule": next })}
               description="Does not write the SAB pause flag. Manual pause/resume still works independently."
             />
           </ManagedSetting>

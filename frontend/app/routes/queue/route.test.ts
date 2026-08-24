@@ -108,6 +108,8 @@ describe("queue route loader", () => {
       historyPageSize: 250,
       queueParams: { query: "", category: "", status: "", sort: null, direction: null },
       historyParams: { query: "", category: "", status: "", sort: null, direction: null },
+      paused: false,
+      pauseInt: "0",
     });
   });
 

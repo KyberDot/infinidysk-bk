@@ -80,13 +80,24 @@ export function parseWeeklyWindowSchedule(
       }
       days.push(n);
     }
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > 1439 || end < 0 || end > 1439) {
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      start > 1439 ||
+      end < 0 ||
+      end > 1439
+    ) {
       return { ok: false, error: "Window minutes must be between 0 and 1439." };
     }
     if (start === end) {
       return { ok: false, error: "Window start and end minutes cannot be equal." };
     }
-    windows.push({ Days: [...new Set(days)].sort((a, b) => a - b), StartMinute: start, EndMinute: end });
+    windows.push({
+      Days: [...new Set(days)].sort((a, b) => a - b),
+      StartMinute: start,
+      EndMinute: end,
+    });
   }
   if (enabled && windows.length === 0) {
     return { ok: false, error: "Enabled schedules must include at least one window." };
@@ -132,9 +143,10 @@ type WeeklyWindowEditorProps = {
 
 export function WeeklyWindowEditor({ id, value, onChange, description }: WeeklyWindowEditorProps) {
   const emptySchedule: WeeklyWindowJson = { Enabled: false, Windows: [] };
-  const parsed = value.trim() === ""
-    ? { ok: true as const, schedule: emptySchedule }
-    : parseWeeklyWindowSchedule(value);
+  const parsed =
+    value.trim() === ""
+      ? { ok: true as const, schedule: emptySchedule }
+      : parseWeeklyWindowSchedule(value);
   const schedule: WeeklyWindowJson = parsed.ok ? parsed.schedule : emptySchedule;
 
   const emit = (next: WeeklyWindowJson) => {
@@ -184,7 +196,11 @@ export function WeeklyWindowEditor({ id, value, onChange, description }: WeeklyW
                     const checked = window.Days.includes(day);
                     const checkboxId = `${id}-w${index}-d${day}`;
                     return (
-                      <label key={day} htmlFor={checkboxId} className="label cursor-pointer gap-1.5 px-0">
+                      <label
+                        key={day}
+                        htmlFor={checkboxId}
+                        className="label cursor-pointer gap-1.5 px-0"
+                      >
                         <Checkbox
                           id={checkboxId}
                           className="checkbox-sm"
@@ -243,7 +259,9 @@ export function WeeklyWindowEditor({ id, value, onChange, description }: WeeklyW
                     size="small"
                     className="btn-error"
                     onClick={() => {
-                      const windows = schedule.Windows.filter((_, itemIndex) => itemIndex !== index);
+                      const windows = schedule.Windows.filter(
+                        (_, itemIndex) => itemIndex !== index,
+                      );
                       emit({
                         Enabled: windows.length > 0,
                         Windows: windows,

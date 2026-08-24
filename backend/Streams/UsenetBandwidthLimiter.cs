@@ -41,10 +41,9 @@ public sealed class UsenetBandwidthLimiter
                 return;
             }
 
-            if (previous <= 0)
-                _availableTokens = BurstCapacityLocked();
-            else
-                _availableTokens = Math.Min(_availableTokens, BurstCapacityLocked());
+            _availableTokens = previous <= 0
+                ? BurstCapacityLocked()
+                : Math.Min(_availableTokens, BurstCapacityLocked());
             PumpLocked();
         }
     }

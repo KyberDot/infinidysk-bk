@@ -28,7 +28,10 @@ describe("weekly window schedule JSON", () => {
   it("rejects non-boolean Enabled values", () => {
     expect(
       isWeeklyWindowScheduleJsonValid(
-        JSON.stringify({ Enabled: "false", Windows: [{ Days: [1], StartMinute: 0, EndMinute: 60 }] }),
+        JSON.stringify({
+          Enabled: "false",
+          Windows: [{ Days: [1], StartMinute: 0, EndMinute: 60 }],
+        }),
       ),
     ).toBe(false);
   });

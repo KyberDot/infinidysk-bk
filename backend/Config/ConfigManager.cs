@@ -947,7 +947,7 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
             GetQueueProcessingSchedule(), now, TimeZoneInfo.Local);
         if (evaluation.IsOpen || evaluation.NextChange is not { } next)
             return "0";
-        var seconds = Math.Max(0, (int)Math.Floor((next - now).TotalSeconds));
+        var seconds = Math.Max(0, (int)Math.Ceiling((next - now).TotalSeconds));
         return seconds.ToString(CultureInfo.InvariantCulture);
     }
 

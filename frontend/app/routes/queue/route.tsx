@@ -124,9 +124,12 @@ export default function Queue(props: Route.ComponentProps) {
   useEffect(() => {
     const seconds = Number(props.loaderData.pauseInt);
     if (!props.loaderData.paused || !Number.isFinite(seconds) || seconds <= 0) return;
-    const handle = window.setTimeout(() => {
-      void revalidator.revalidate();
-    }, Math.min(seconds, 86_400) * 1000);
+    const handle = window.setTimeout(
+      () => {
+        void revalidator.revalidate();
+      },
+      Math.min(seconds, 86_400) * 1000,
+    );
     return () => window.clearTimeout(handle);
   }, [props.loaderData.paused, props.loaderData.pauseInt, revalidator]);
 
