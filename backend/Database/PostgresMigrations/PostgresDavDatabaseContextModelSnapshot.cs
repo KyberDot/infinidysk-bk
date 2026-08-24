@@ -130,6 +130,11 @@ namespace NzbWebDAV.Database.PostgresMigrations
                     b.Property<string>("GeneratedSymlinkTarget")
                         .HasColumnType("text");
 
+                    b.Property<bool>("HealthRepairPending")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<Guid?>("HistoryItemId")
                         .HasColumnType("uuid");
 
@@ -184,6 +189,8 @@ namespace NzbWebDAV.Database.PostgresMigrations
                     b.HasIndex("HistoryItemId", "Type", "CreatedAt");
 
                     b.HasIndex("Type", "HistoryItemId", "NextHealthCheck", "ReleaseDate", "Id");
+
+                    b.HasIndex("HealthRepairPending", "NextHealthCheck");
 
                     b.ToTable("DavItems", (string)null);
                 });

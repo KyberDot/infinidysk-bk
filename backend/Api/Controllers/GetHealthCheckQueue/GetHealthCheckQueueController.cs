@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
@@ -8,7 +9,10 @@ namespace NzbWebDAV.Api.Controllers.GetHealthCheckQueue;
 
 [ApiController]
 [Route("api/get-health-check-queue")]
-public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApiController
+public class GetHealthCheckQueueController(
+    DavDatabaseClient dbClient,
+    HealthWorkSchedulePolicy healthWorkSchedule
+) : BaseApiController
 {
     private async Task<GetHealthCheckQueueResponse> GetHealthCheckQueue(GetHealthCheckQueueRequest request)
     {
@@ -29,10 +33,11 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
 
         // Match HealthCheckService.ExecuteAsync: only media/archive candidates are ever
         // processed, so non-media files (nfo/srt/jpg/…) must not inflate this count or
-        // the Health UI "initial scan pending" banner never clears.
+        // the Health UI "initial scan pending" banner never clears. Pending repairs are
+        // already counted separately on the schedule snapshot.
         var uncheckedCount = 0;
         await foreach (var name in HealthCheckService.GetHealthCheckQueueItemsQuery(dbClient)
-            .Where(x => x.NextHealthCheck == null)
+            .Where(x => x.NextHealthCheck == null && !x.HealthRepairPending)
             .Select(x => x.Name)
             .AsAsyncEnumerable()
             .ConfigureAwait(false))
@@ -40,9 +45,24 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
             if (FilenameUtil.IsHealthCheckCandidate(name)) uncheckedCount++;
         }
 
+        var pendingRepairCount = await dbClient.Ctx.Items
+            .CountAsync(x => x.HealthRepairPending, HttpContext.RequestAborted)
+            .ConfigureAwait(false);
+        var admission = healthWorkSchedule.Evaluate(DateTimeOffset.UtcNow);
+
         return new GetHealthCheckQueueResponse()
         {
             UncheckedCount = uncheckedCount,
+            Schedule = new GetHealthCheckQueueResponse.HealthCheckScheduleStatus
+            {
+                TimeZoneId = admission.TimeZoneId,
+                ChecksOpen = admission.ChecksOpen,
+                RepairsOpen = admission.RepairsOpen,
+                NextChecksChange = admission.NextChecksChange,
+                NextRepairsChange = admission.NextRepairsChange,
+                PendingRepairCount = pendingRepairCount,
+                ManualRunActive = admission.ManualRunActive,
+            },
             Items = davItems.Select(x => new GetHealthCheckQueueResponse.HealthCheckQueueItem()
             {
                 Id = x.Id.ToString(),

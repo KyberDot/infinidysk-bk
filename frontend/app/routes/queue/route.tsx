@@ -86,6 +86,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     historyPageSize,
     queueParams,
     historyParams,
+    paused: queue?.paused ?? false,
+    pauseInt: queue?.pause_int ?? "0",
   };
 }
 
@@ -264,6 +266,13 @@ export default function Queue(props: Route.ComponentProps) {
   return (
     <div className="flex min-h-full min-w-full flex-col gap-8 px-4 py-4 text-sm text-base-content/70 md:px-8">
       {dropzone.rejectMessage && <Alert variant="warning">{dropzone.rejectMessage}</Alert>}
+      {props.loaderData.paused && (
+        <Alert className="alert-soft" variant="info">
+          {Number(props.loaderData.pauseInt) > 0
+            ? `Queue downloads are paused by schedule until ${new Date(Date.now() + Number(props.loaderData.pauseInt) * 1000).toLocaleString()}. Active imports keep running.`
+            : "The queue is paused. Resume it from SABnzbd-compatible clients or wait for a manual resume."}
+        </Alert>
+      )}
 
       {/* queue */}
       <div className="min-h-[413.9px] min-[450px]:min-h-[382.9px]">

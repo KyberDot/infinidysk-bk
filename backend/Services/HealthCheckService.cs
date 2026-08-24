@@ -6,6 +6,7 @@ using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
@@ -74,6 +75,7 @@ public class HealthCheckService : BackgroundService
     private readonly RepairPatchStore _repairPatchStore;
     private readonly IDbContextFactory<DavDatabaseContext>? _dbContextFactory;
     private readonly TimeProvider _timeProvider;
+    private readonly HealthWorkSchedulePolicy? _healthWorkSchedule;
 
     private static readonly HashSet<string> _missingSegmentIds = [];
     private static readonly Queue<string> _missingSegmentOrder = [];
@@ -92,7 +94,8 @@ public class HealthCheckService : BackgroundService
         RepairPatchStore repairPatchStore,
         ArrReplacementSearchBudget replacementSearchBudget,
         IDbContextFactory<DavDatabaseContext>? dbContextFactory = null,
-        TimeProvider? timeProvider = null
+        TimeProvider? timeProvider = null,
+        HealthWorkSchedulePolicy? healthWorkSchedule = null
     )
     {
         _configManager = configManager;
@@ -106,6 +109,7 @@ public class HealthCheckService : BackgroundService
         _repairPatchStore = repairPatchStore;
         _dbContextFactory = dbContextFactory;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _healthWorkSchedule = healthWorkSchedule;
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -159,6 +163,14 @@ public class HealthCheckService : BackgroundService
                     continue;
                 }
 
+                var admission = _healthWorkSchedule?.Evaluate(DateTimeOffset.UtcNow)
+                    ?? new HealthWorkAdmission(true, true, null, null, TimeZoneInfo.Local.Id, false);
+                if (!admission.ChecksOpen && !admission.RepairsOpen)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), _timeProvider, stoppingToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 // get concurrency (capped to avoid saturating the NNTP pool)
                 var concurrency = _configManager.GetHealthCheckConcurrency();
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -177,8 +189,13 @@ public class HealthCheckService : BackgroundService
                     .WithCancellation(cts.Token)
                     .ConfigureAwait(false))
                 {
-                    if (item.NextHealthCheck == DateTimeOffset.UnixEpoch ||
-                        FilenameUtil.IsHealthCheckCandidate(item.Name))
+                    var isUrgentOrPending = item.NextHealthCheck == DateTimeOffset.UnixEpoch
+                        || item.HealthRepairPending;
+                    if (!admission.RepairsOpen && isUrgentOrPending)
+                        continue;
+                    if (!admission.ChecksOpen && !isUrgentOrPending)
+                        continue;
+                    if (isUrgentOrPending || FilenameUtil.IsHealthCheckCandidate(item.Name))
                     {
                         davItem = item;
                         break;
@@ -188,6 +205,7 @@ public class HealthCheckService : BackgroundService
                 // if there is no item to health-check, don't do anything
                 if (davItem == null)
                 {
+                    _healthWorkSchedule?.EndManualRun();
                     await Task.Delay(TimeSpan.FromSeconds(5), _timeProvider, cts.Token).ConfigureAwait(false);
                     continue;
                 }
@@ -223,7 +241,7 @@ public class HealthCheckService : BackgroundService
         // routine rechecks cannot starve the initial scan.
         return GetHealthCheckQueueItemsQuery(dbClient)
             .OrderBy(x =>
-                x.NextHealthCheck == DateTimeOffset.UnixEpoch ? 0 :
+                x.NextHealthCheck == DateTimeOffset.UnixEpoch || x.HealthRepairPending ? 0 :
                 x.NextHealthCheck == null ? 1 : 2)
             .ThenBy(x => x.NextHealthCheck)
             .ThenByDescending(x => x.ReleaseDate)
@@ -322,6 +340,7 @@ public class HealthCheckService : BackgroundService
         // Skip the STAT-only recheck and repair immediately: STAT can pass while BODY returns 430
         // (see nzbdav-dev#209), and structurally corrupt archives can have every article present.
         var isUrgentRepair = davItem.NextHealthCheck == DateTimeOffset.UnixEpoch;
+        var repairsAdmitted = _healthWorkSchedule?.Evaluate(DateTimeOffset.UtcNow).RepairsOpen ?? true;
 
         // Attribution for latency histograms — does not change pool admission priority.
         using var maintenanceScope = ct.SetContext(MaintenanceDownloadContext.Instance);
@@ -346,7 +365,7 @@ public class HealthCheckService : BackgroundService
                     return;
                 }
                 Log.Information("Performing urgent dynamic repair for {FilePath}", davItem.Path);
-                await HandleUrgentRepair(davItem, dbClient, ct).ConfigureAwait(false);
+                await HandleUrgentRepair(davItem, dbClient, repairsAdmitted, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -461,7 +480,7 @@ public class HealthCheckService : BackgroundService
             {
                 await HandleConfirmedHolesAsync(
                         davItem, dbClient, nzbFile!, segments, segmentRanges!,
-                        statHoles, remainingCorrupt, ct)
+                        statHoles, remainingCorrupt, repairsAdmitted, ct)
                     .ConfigureAwait(false);
                 return;
             }
@@ -552,6 +571,12 @@ public class HealthCheckService : BackgroundService
                 }
             }
 
+            if (!repairsAdmitted)
+            {
+                await DeferRepairUntilWindow(davItem, dbClient, ct).ConfigureAwait(false);
+                return;
+            }
+
             // When no Arr replacement is available, PAR2 remains the only automatic recovery path.
             if (ShouldAttemptPar2Repair()
                 && await _par2RepairService.TryPar2RepairAsync(davItem, [e.SegmentId], ct).ConfigureAwait(false))
@@ -625,8 +650,15 @@ public class HealthCheckService : BackgroundService
         LongRange[] segmentRanges,
         List<int> missingIndices,
         List<int> corruptIndices,
+        bool repairsAdmitted,
         CancellationToken ct)
     {
+        if (!repairsAdmitted)
+        {
+            await DeferRepairUntilWindow(davItem, dbClient, ct).ConfigureAwait(false);
+            return;
+        }
+
         var holeIndices = missingIndices
             .Concat(corruptIndices)
             .Distinct()
@@ -1608,8 +1640,18 @@ public class HealthCheckService : BackgroundService
         Log.Warning(exception, messageTemplate, host);
     }
 
-    private async Task HandleUrgentRepair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct)
+    private async Task HandleUrgentRepair(
+        DavItem davItem,
+        DavDatabaseClient dbClient,
+        bool repairsAdmitted,
+        CancellationToken ct)
     {
+        if (!repairsAdmitted)
+        {
+            await DeferRepairUntilWindow(davItem, dbClient, ct).ConfigureAwait(false);
+            return;
+        }
+
         var threshold = _configManager.GetAutoRemoveAfterFailures();
         var failureSnapshot = _failureTracker.GetSnapshot(davItem.Id);
         var failureCount = failureSnapshot.Count;
@@ -1983,6 +2025,29 @@ public class HealthCheckService : BackgroundService
     }
 
 
+    private async Task DeferRepairUntilWindow(
+        DavItem davItem,
+        DavDatabaseClient dbClient,
+        CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var admission = _healthWorkSchedule?.Evaluate(now);
+        davItem.HealthRepairPending = true;
+        davItem.LastHealthCheck = now;
+        davItem.NextHealthCheck = admission?.NextRepairsChange ?? now + TimeSpan.FromDays(1);
+        Log.Warning(
+            "Repair deferred by schedule for {Path}. Next repair window opens {NextChange}.",
+            davItem.Path,
+            davItem.NextHealthCheck);
+        await RecordHealthResult(
+            dbClient,
+            davItem,
+            HealthCheckResult.HealthResult.Unhealthy,
+            HealthCheckResult.RepairAction.ActionNeeded,
+            $"Repair deferred by the repair schedule. Next repair window opens {davItem.NextHealthCheck:u}.",
+            ct).ConfigureAwait(false);
+    }
+
     private async Task RecordHealthResult
     (
         DavDatabaseClient dbClient,
@@ -1993,6 +2058,14 @@ public class HealthCheckService : BackgroundService
         CancellationToken ct
     )
     {
+        if (result is HealthCheckResult.HealthResult.Healthy
+            || repairStatus is HealthCheckResult.RepairAction.Repaired
+                or HealthCheckResult.RepairAction.Deleted
+                or HealthCheckResult.RepairAction.RepairedViaPar2)
+        {
+            davItem.HealthRepairPending = false;
+        }
+
         var identity = repairStatus is HealthCheckResult.RepairAction.Deleted or HealthCheckResult.RepairAction.Repaired
             ? await GetRepairHistoryIdentityAsync(dbClient.Ctx, davItem, ct).ConfigureAwait(false)
             : null;

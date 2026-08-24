@@ -1,8 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
-using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Controllers.ResetHealthCheckQueue;
 
@@ -19,12 +18,8 @@ public class ResetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseA
                 new BaseApiResponse { Status = false, Error = "POST required" });
         }
 
-        var resetCount = await dbClient.Ctx.Items
-            .Where(x => x.Type == DavItem.ItemType.UsenetFile)
-            .Where(x => x.NextHealthCheck != null && x.NextHealthCheck != DateTimeOffset.UnixEpoch)
-            .ExecuteUpdateAsync(
-                x => x.SetProperty(item => item.NextHealthCheck, (DateTimeOffset?)null),
-                HttpContext.RequestAborted)
+        var resetCount = await HealthCheckQueueMutations
+            .MakeDueAsync(dbClient.Ctx, HttpContext.RequestAborted)
             .ConfigureAwait(false);
 
         return Ok(new ResetHealthCheckQueueResponse

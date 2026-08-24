@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
@@ -537,6 +538,12 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
                 case ConfigKeys.ProwlarrSyncStatus:
                     RequireJson<ProwlarrSyncStatus>(item.ConfigName, value, jsonOptions);
                     break;
+
+                case ConfigKeys.QueueProcessingSchedule:
+                case ConfigKeys.RepairHealthcheckSchedule:
+                case ConfigKeys.RepairActionSchedule:
+                    RequireWeeklyWindowSchedule(item.ConfigName, value, jsonOptions);
+                    break;
             }
         }
 
@@ -909,6 +916,74 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     {
         var v = StringUtil.EmptyToNull(GetConfigValue(ConfigKeys.QueuePaused));
         return v != null && bool.Parse(v);
+    }
+
+    /// <summary>
+    /// Manual SAB pause or a closed download window. Scheduler never writes
+    /// <see cref="ConfigKeys.QueuePaused"/>.
+    /// </summary>
+    public bool IsQueueEffectivelyPaused(DateTimeOffset? utcNow = null) =>
+        IsSabQueuePaused() || !IsQueueProcessingOpen(utcNow);
+
+    public bool IsQueueProcessingOpen(DateTimeOffset? utcNow = null)
+    {
+        var evaluation = WeeklyWindowEvaluator.Evaluate(
+            GetQueueProcessingSchedule(), utcNow ?? DateTimeOffset.UtcNow, TimeZoneInfo.Local);
+        return evaluation.IsOpen;
+    }
+
+    /// <summary>
+    /// Whole seconds until the download window reopens. Zero when a manual SAB
+    /// pause is the blocker, or when processing is unrestricted / currently open.
+    /// </summary>
+    public string GetQueuePauseInt(DateTimeOffset? utcNow = null)
+    {
+        if (IsSabQueuePaused()) return "0";
+        var now = utcNow ?? DateTimeOffset.UtcNow;
+        var evaluation = WeeklyWindowEvaluator.Evaluate(
+            GetQueueProcessingSchedule(), now, TimeZoneInfo.Local);
+        if (evaluation.IsOpen || evaluation.NextChange is not { } next)
+            return "0";
+        var seconds = Math.Max(0, (int)Math.Floor((next - now).TotalSeconds));
+        return seconds.ToString(CultureInfo.InvariantCulture);
+    }
+
+    public WeeklyWindowSchedule GetQueueProcessingSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.QueueProcessingSchedule);
+
+    public WeeklyWindowSchedule GetRepairHealthcheckSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.RepairHealthcheckSchedule);
+
+    public WeeklyWindowSchedule GetRepairActionSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.RepairActionSchedule);
+
+    private WeeklyWindowSchedule ReadWeeklyWindowSchedule(string key)
+    {
+        var raw = StringUtil.EmptyToNull(GetConfigValue(key));
+        if (raw is null) return WeeklyWindowSchedule.Unrestricted;
+        if (WeeklyWindowSchedule.TryParse(raw, out var schedule, out var error))
+            return schedule;
+        Log.Warning("Ignoring invalid {ConfigKey} schedule. Reason: {Reason}", key, error);
+        return WeeklyWindowSchedule.Unrestricted;
+    }
+
+    private static void RequireWeeklyWindowSchedule(string key, string value, JsonSerializerOptions? options)
+    {
+        WeeklyWindowSchedule? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<WeeklyWindowSchedule>(
+                value, options ?? WeeklyWindowSchedule.ParseOptions);
+        }
+        catch (JsonException e)
+        {
+            throw new ArgumentException($"Config value for '{key}' is not valid JSON: {e.Message}");
+        }
+
+        if (parsed is null)
+            throw new ArgumentException($"Config value for '{key}' is not valid JSON.");
+        if (!WeeklyWindowSchedule.TryValidate(parsed, out var error))
+            throw new ArgumentException($"Config value for '{key}' is invalid: {error}");
     }
 
     /// <summary>

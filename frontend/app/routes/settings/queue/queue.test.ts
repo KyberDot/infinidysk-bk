@@ -11,6 +11,7 @@ const validConfig = {
   "usenet.max-queue-connections": "",
   "queue.max-items": "0",
   "queue.resume-threshold": "0",
+  "queue.processing-schedule": "",
 };
 
 afterEach(cleanup);
@@ -96,6 +97,15 @@ describe("Queue settings", () => {
       isQueueSettingsValid({
         ...validConfig,
         "usenet.max-queue-connections": "0",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects invalid download schedules", () => {
+    expect(
+      isQueueSettingsValid({
+        ...validConfig,
+        "queue.processing-schedule": '{"Enabled":true,"Windows":[]}',
       }),
     ).toBe(false);
   });

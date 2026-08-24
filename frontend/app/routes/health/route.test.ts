@@ -56,6 +56,7 @@ describe("health route loader", () => {
     getHealthCheckQueueMock.mockResolvedValueOnce({
       uncheckedCount: 12,
       items: queueItems,
+      schedule: null,
     });
     getHealthCheckHistoryMock.mockResolvedValueOnce({
       stats: historyStats,
@@ -74,6 +75,7 @@ describe("health route loader", () => {
       historyPageSize: 25,
       historyFilter: "all",
       isEnabled: true,
+      schedule: null,
     });
     expect(getHealthCheckQueueMock).toHaveBeenCalledWith(30);
     expect(getHealthCheckHistoryMock).toHaveBeenCalledWith({

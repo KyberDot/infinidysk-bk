@@ -139,7 +139,9 @@ app.use(async (req, res, next) => {
       decodedPath !== null &&
       req.method.toUpperCase() === "POST" &&
       (decodedPath === "/api/delete-webdav-item" ||
-        decodedPath.startsWith("/api/delete-webdav-item/"))
+        decodedPath.startsWith("/api/delete-webdav-item/") ||
+        decodedPath === "/api/trigger-health-check" ||
+        decodedPath.startsWith("/api/trigger-health-check/"))
     ) {
       const user = await getSessionUser(req);
       if (user?.role === "readonly") {

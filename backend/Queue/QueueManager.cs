@@ -37,6 +37,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
     private readonly WatchdogLog _watchdogLog;
     private readonly QueueItemSourceTracker _sourceTracker;
     private readonly BenchmarkGate _benchmarkGate;
+    private readonly IDisposable _configChangeSubscription;
 
     private CancellationTokenSource _sleepingQueueToken = new();
     private readonly Lock _sleepingQueueLock = new();
@@ -115,9 +116,20 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         _dbContextFactory = dbContextFactory;
         _cancellationTokenSource = CancellationTokenSource
             .CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
+        _configChangeSubscription = _configManager.Subscribe(OnConfigChanged);
         if (startLoop)
             StartProcessing();
     }
+
+    private void OnConfigChanged(object? sender, ConfigManager.ConfigEventArgs args)
+    {
+        if (!args.ChangedConfig.ContainsKey(ConfigKeys.QueueProcessingSchedule))
+            return;
+        AwakenQueue();
+    }
+
+    private bool IsNewWorkBlocked() =>
+        _benchmarkGate.IsPaused || _configManager.IsQueueEffectivelyPaused();
 
     /// <summary>
     /// Starts the background queue loop. Safe to call more than once; only the
@@ -467,7 +479,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             // claiming work. Any item already in progress finishes naturally; this
             // only gates new work. ResumeController calls AwakenQueue so resume
             // does not wait out the full poll interval.
-            if (_benchmarkGate.IsPaused || _configManager.IsSabQueuePaused())
+            if (IsNewWorkBlocked())
             {
                 try
                 {
@@ -543,7 +555,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
     private async Task FillWorkerSlotsAsync(CancellationToken ct)
     {
-        while (!_benchmarkGate.IsPaused && !_configManager.IsSabQueuePaused() && !ct.IsCancellationRequested)
+        while (!IsNewWorkBlocked() && !ct.IsCancellationRequested)
         {
             var workerCount = _configManager.GetQueueWorkerCount();
             if (_inProgress.Count >= workerCount)
@@ -1244,6 +1256,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             Log.Debug(e, "Queue coordinator exited with error during dispose");
         }
 
+        _configChangeSubscription.Dispose();
         _cancellationTokenSource?.Dispose();
         _stateLock.Dispose();
         _finalizeLock.Dispose();

@@ -449,6 +449,16 @@ class BackendClient {
     );
   }
 
+  public async triggerHealthCheck(): Promise<{ queuedCount: number; alreadyRunning: boolean }> {
+    return await call<{ queuedCount: number; alreadyRunning: boolean }>(
+      adminApi.triggerHealthCheck,
+      "Failed to trigger health checks",
+      {
+        method: "POST",
+      },
+    );
+  }
+
   public async getWatchdogEntries(limit: number = 200): Promise<WatchdogEntry[]> {
     const data = await call<{ entries?: WatchdogEntry[] }>(
       `${adminApi.getWatchdogEntries}?limit=${limit}`,
@@ -659,6 +669,8 @@ export const backendClient = new BackendClient();
 export type QueueResponse = {
   slots: QueueSlot[];
   noofslots: number;
+  paused?: boolean;
+  pause_int?: string;
 };
 
 export type QueueSlot = {
@@ -861,9 +873,20 @@ export type TestUsenetConnectionRequest = {
   pass: string;
 };
 
+export type HealthCheckScheduleStatus = {
+  timeZoneId: string;
+  checksOpen: boolean;
+  repairsOpen: boolean;
+  nextChecksChange: string | null;
+  nextRepairsChange: string | null;
+  pendingRepairCount: number;
+  manualRunActive: boolean;
+};
+
 export type HealthCheckQueueResponse = {
   uncheckedCount: number;
   items: HealthCheckQueueItem[];
+  schedule?: HealthCheckScheduleStatus | null;
 };
 
 export type HealthCheckQueueItem = {

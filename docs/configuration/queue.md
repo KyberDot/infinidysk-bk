@@ -44,6 +44,14 @@ The resume threshold adds hysteresis after the maximum is reached. Set it to
 submissions that replace an existing queue item remain allowed because they do
 not increase queue depth.
 
+## Download schedule [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since }
+
+| Control | Config key | Default | Effect |
+|---------|------------|---------|--------|
+| Download schedule | `queue.processing-schedule` | empty (always on) | JSON weekly windows that admit **new** queue downloads |
+
+Empty or disabled JSON is today's unrestricted behavior. Enabled schedules need at least one window. Weekdays are `0` (Sunday) through `6` (Saturday). Minutes are half-open `[start, end)` in the host's local timezone (container `TZ`). `end` before `start` is overnight. Active imports finish if a window closes; WebDAV playback is never gated. The scheduler never writes `queue.paused` — SAB `mode=pause|resume` remains the manual override. When only the schedule is closed, SAB `queue.paused` is `true` and `pause_int` is whole seconds until the next open window. Manual pause reports `pause_int` as `0`.
+
 ## Reordering [since 1.2.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.2.0){ .nzbdav-since }
 
 Use the Queue page's up, down, or top controls to change waiting-job order.

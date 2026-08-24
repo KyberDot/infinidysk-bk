@@ -57,6 +57,7 @@ public static class ConfigKeys
     public const string QueueWorkerCount = "queue.worker-count";
     public const string QueuePaused = "queue.paused";
     public const string QueueSpeedLimitKbps = "queue.speed-limit-kbps";
+    public const string QueueProcessingSchedule = "queue.processing-schedule";
     public const string UsenetPipelinedBodyRequests = "usenet.pipelined-body-requests";
     public const string UsenetQueuePipeliningEnabled = "usenet.queue-pipelining.enabled";
     public const string UsenetQueuePipeliningDepth = "usenet.queue-pipelining.depth";
@@ -111,6 +112,8 @@ public static class ConfigKeys
     public const string RepairDegradedMaxTotalMissing = "repair.degraded-max-total-missing";
     public const string RepairDegradedMaxMissingBytePercent = "repair.degraded-max-missing-byte-percent";
     public const string RepairCorruptionTrackingEnabled = "repair.corruption-tracking-enabled";
+    public const string RepairHealthcheckSchedule = "repair.healthcheck-schedule";
+    public const string RepairActionSchedule = "repair.action-schedule";
     public const string ArrInstances = "arr.instances";
     public const string ArrHealthEnabled = "arr.health-enabled";
 

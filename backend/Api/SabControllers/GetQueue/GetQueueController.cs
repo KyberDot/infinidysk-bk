@@ -139,7 +139,8 @@ public class GetQueueController(
         {
             Queue = new GetQueueResponse.QueueObject()
             {
-                Paused = Config.IsSabQueuePaused(),
+                Paused = Config.IsQueueEffectivelyPaused(),
+                PauseInt = Config.GetQueuePauseInt(),
                 Slots = slots,
                 TotalCount = totalCount,
                 SpeedLimit = speedLimitKbps.ToString(),

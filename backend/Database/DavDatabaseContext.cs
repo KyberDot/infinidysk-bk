@@ -341,6 +341,12 @@ public class DavDatabaseContext : DbContext
                     x => x.HasValue ? DateTimeOffset.FromUnixTimeSeconds(x.Value) : null
                 );
 
+            e.Property(i => i.HealthRepairPending)
+                .IsRequired()
+                .HasDefaultValue(false);
+
+            e.HasIndex(i => new { i.HealthRepairPending, i.NextHealthCheck });
+
             e.Property(i => i.FileBlobId)
                 .ValueGeneratedNever()
                 .IsRequired(false);
