@@ -113,4 +113,16 @@ public class FailFastDeadNzbTests
         Assert.Throws<UsenetArticleNotFoundException>(() =>
             HealthCheckService.CheckCachedMissingSegmentIds([segmentId]));
     }
+
+    [Fact]
+    public void MidpointMiss_UsesSameNonRetryableCachePath()
+    {
+        var segmentId = $"midpoint-{Guid.NewGuid():N}@example.com";
+        var exception = new UsenetArticleNotFoundException(segmentId);
+        Assert.IsAssignableFrom<NonRetryableDownloadException>(exception);
+
+        HealthCheckService.AddMissingSegmentIds([exception.SegmentId]);
+        Assert.Throws<UsenetArticleNotFoundException>(() =>
+            HealthCheckService.CheckCachedMissingSegmentIds([segmentId]));
+    }
 }
