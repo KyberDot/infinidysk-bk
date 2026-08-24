@@ -5,8 +5,8 @@ namespace NzbWebDAV.Tests.Api;
 
 public class GetOverviewStatsProviderSeriesTests
 {
-    private static readonly string ProviderA = Guid.NewGuid().ToString("N");
-    private static readonly string ProviderB = Guid.NewGuid().ToString("N");
+    private const string ProviderA = "11111111111111111111111111111111";
+    private const string ProviderB = "22222222222222222222222222222222";
     private static readonly IReadOnlyDictionary<string, string?> Labels =
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {

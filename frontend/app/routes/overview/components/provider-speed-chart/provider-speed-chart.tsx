@@ -269,37 +269,28 @@ function buildSpeedPath(
   y: (v: number) => number,
 ): string {
   const parts: string[] = [];
-  let i = 0;
-  while (i < points.length) {
-    const current = points[i];
-    if (!current || current.speedMbPerSec <= 0) {
-      i++;
-      continue;
-    }
-    const runStart = i;
-    while (i < points.length) {
-      const p = points[i];
-      if (!p || p.speedMbPerSec <= 0) break;
-      i++;
-    }
-    const runEnd = i - 1;
-    const from = runStart > 0 ? runStart - 1 : runStart;
-    const to = runEnd < points.length - 1 ? runEnd + 1 : runEnd;
-
-    for (let j = from; j <= to; j++) {
-      const p = points[j];
-      if (!p) continue;
-      const x = (j * xStep).toFixed(1);
-      const yy = y(p.speedMbPerSec).toFixed(1);
-      parts.push(`${j === from ? "M" : "L"}${x},${yy}`);
-    }
-    if (from === to) {
-      const p = points[from];
-      if (p) {
-        const x2 = (from * xStep + Math.max(xStep * 0.15, 1)).toFixed(1);
-        const yy = y(p.speedMbPerSec).toFixed(1);
-        parts.push(`L${x2},${yy}`);
+  let inSegment = false;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    if (!p) continue;
+    const value = p.speedMbPerSec;
+    const x = (i * xStep).toFixed(1);
+    const yy = y(value).toFixed(1);
+    if (value > 0) {
+      if (!inSegment) {
+        parts.push(`M${x},${yy}`);
+        inSegment = true;
+        const next = points[i + 1];
+        const nextZero = i === points.length - 1 || !next || next.speedMbPerSec <= 0;
+        if (nextZero) {
+          const x2 = (i * xStep + Math.max(xStep * 0.15, 1)).toFixed(1);
+          parts.push(`L${x2},${yy}`);
+        }
+      } else {
+        parts.push(`L${x},${yy}`);
       }
+    } else {
+      inSegment = false;
     }
   }
   return parts.join(" ");

@@ -464,7 +464,7 @@ export default function Overview({ loaderData }: Route.ComponentProps) {
           <ProviderScoreboard
             providers={stats.providers}
             window={window}
-            selectedProvider={selectedProvider}
+            selectedProvider={stats.window === window ? selectedProvider : null}
             onSelectProvider={setSelectedProvider}
             providerSpeedBucketSizeMs={stats.providerSpeedBucketSizeMs ?? 900_000}
             providerSpeedHistoryTruncated={stats.providerSpeedHistoryTruncated ?? false}
