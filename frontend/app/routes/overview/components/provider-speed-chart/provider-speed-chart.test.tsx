@@ -34,4 +34,23 @@ describe("ProviderSpeedChart", () => {
     // Three buckets span 800 viewBox units, so the idle bucket is at x=400.
     expect(d).not.toContain("400.0,");
   });
+
+  it("keeps a terminal isolated sample inside the viewBox", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderSpeedChart
+        providerLabel="Alpha"
+        points={[point(0), point(0), point(7)]}
+        bucketSizeMs={60_000}
+        historyTruncated={false}
+        window="1h"
+      />,
+    );
+    const d = speedPathD(markup);
+    const xs = [...d.matchAll(/[ML]([\d.]+),/g)].map((match) => Number(match[1]));
+
+    expect(d).not.toBe("");
+    expect(xs.length).toBeGreaterThan(0);
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(800);
+  });
 });

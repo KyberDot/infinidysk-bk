@@ -283,7 +283,11 @@ function buildSpeedPath(
         const next = points[i + 1];
         const nextZero = i === points.length - 1 || !next || next.speedMbPerSec <= 0;
         if (nextZero) {
-          const x2 = (i * xStep + Math.max(xStep * 0.15, 1)).toFixed(1);
+          const extension = Math.max(xStep * 0.15, 1);
+          const x2 = Math.max(
+            0,
+            Math.min(VB_W, i * xStep + (i === points.length - 1 && i > 0 ? -extension : extension)),
+          ).toFixed(1);
           parts.push(`L${x2},${yy}`);
         }
       } else {
