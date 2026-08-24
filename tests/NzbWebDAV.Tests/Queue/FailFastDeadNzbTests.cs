@@ -118,10 +118,18 @@ public class FailFastDeadNzbTests
     [Fact]
     public async Task MidpointMiss_CachesProbedIdThroughProductionPreflightAndHandler()
     {
-        IReadOnlyList<IReadOnlyList<string>> files = [["video-0", "video-1", "video-2", "video-3"]];
+        IReadOnlyList<IReadOnlyList<string>> files =
+        [
+            [
+                "midpoint-preflight-video-0@example.com",
+                "midpoint-preflight-video-1@example.com",
+                "midpoint-preflight-video-2@example.com",
+                "midpoint-preflight-video-3@example.com",
+            ],
+        ];
         var articles = QueueItemProcessor.SelectArticlesForExistenceCheck(files, "full");
         var probeId = QueueItemProcessor.SelectMidpointPreflightSegment(files);
-        Assert.Equal("video-2", probeId);
+        Assert.Equal("midpoint-preflight-video-2@example.com", probeId);
         Assert.NotNull(probeId);
 
         var available = articles
