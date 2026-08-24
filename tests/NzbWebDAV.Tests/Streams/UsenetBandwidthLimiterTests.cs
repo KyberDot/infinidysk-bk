@@ -27,37 +27,51 @@ public class UsenetBandwidthLimiterTests
     }
 
     [Fact]
+    public async Task AcquireAsync_AboveBurst_DoesNotCompleteImmediatelyAtLowRate()
+    {
+        var time = new ControllableTimeProvider();
+        var limiter = new UsenetBandwidthLimiter(time);
+        limiter.UpdateLimit(10_000);
+
+        var task = limiter.AcquireAsync(64 * 1024, CancellationToken.None).AsTask();
+        Assert.False(task.IsCompleted);
+
+        await PumpUntilCompleted(task, time, TimeSpan.FromSeconds(10));
+        Assert.Equal(64 * 1024, limiter.TotalChargedBytes);
+    }
+
+    [Fact]
     public async Task AcquireAsync_AfterBurst_WaitsForRefillAtConfiguredRate()
     {
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(10_000);
-
-        await limiter.AcquireAsync(64 * 1024, CancellationToken.None);
+        await limiter.AcquireAsync(Burst(10_000), CancellationToken.None);
 
         var waiting = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
         Assert.False(waiting.IsCompleted);
 
-        time.Advance(TimeSpan.FromSeconds(1));
-        await waiting.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal(64 * 1024 + 10_000, limiter.TotalChargedBytes);
+        await PumpUntilCompleted(waiting, time, TimeSpan.FromSeconds(2));
+        Assert.Equal(Burst(10_000) + 10_000, limiter.TotalChargedBytes);
     }
 
     [Fact]
-    public async Task AcquireAsync_OversizedGrant_TakesBurstThenIncursDebt()
+    public async Task AcquireAsync_OversizedGrant_WaitsInsteadOfBypassingTheCap()
     {
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(10_000);
 
-        await limiter.AcquireAsync(200_000, CancellationToken.None);
+        var first = limiter.AcquireAsync(200_000, CancellationToken.None).AsTask();
+        Assert.False(first.IsCompleted);
+
+        await PumpUntilCompleted(first, time, TimeSpan.FromSeconds(25));
         Assert.Equal(200_000, limiter.TotalChargedBytes);
 
         var waiting = limiter.AcquireAsync(1, CancellationToken.None).AsTask();
         Assert.False(waiting.IsCompleted);
 
-        time.Advance(TimeSpan.FromSeconds(20));
-        await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+        await PumpUntilCompleted(waiting, time, TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -66,19 +80,17 @@ public class UsenetBandwidthLimiterTests
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(10_000);
-        await limiter.AcquireAsync(64 * 1024, CancellationToken.None);
+        await limiter.AcquireAsync(Burst(10_000), CancellationToken.None);
 
         var first = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
         var second = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
         Assert.False(first.IsCompleted);
         Assert.False(second.IsCompleted);
 
-        time.Advance(TimeSpan.FromSeconds(1));
-        await first.WaitAsync(TimeSpan.FromSeconds(2));
+        await PumpUntilCompleted(first, time, TimeSpan.FromSeconds(2));
         Assert.False(second.IsCompleted);
 
-        time.Advance(TimeSpan.FromSeconds(1));
-        await second.WaitAsync(TimeSpan.FromSeconds(2));
+        await PumpUntilCompleted(second, time, TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -87,7 +99,7 @@ public class UsenetBandwidthLimiterTests
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(10_000);
-        await limiter.AcquireAsync(64 * 1024, CancellationToken.None);
+        await limiter.AcquireAsync(Burst(10_000), CancellationToken.None);
 
         using var cts = new CancellationTokenSource();
         var cancelled = limiter.AcquireAsync(10_000, cts.Token).AsTask();
@@ -97,8 +109,7 @@ public class UsenetBandwidthLimiterTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
         Assert.False(next.IsCompleted);
 
-        time.Advance(TimeSpan.FromSeconds(1));
-        await next.WaitAsync(TimeSpan.FromSeconds(2));
+        await PumpUntilCompleted(next, time, TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -107,7 +118,7 @@ public class UsenetBandwidthLimiterTests
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(10_000);
-        await limiter.AcquireAsync(64 * 1024, CancellationToken.None);
+        await limiter.AcquireAsync(Burst(10_000), CancellationToken.None);
         var charged = limiter.TotalChargedBytes;
 
         var waiting = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
@@ -125,11 +136,21 @@ public class UsenetBandwidthLimiterTests
         var time = new ControllableTimeProvider();
         var limiter = new UsenetBandwidthLimiter(time);
         limiter.UpdateLimit(1_000);
-        await limiter.AcquireAsync(64 * 1024, CancellationToken.None);
+        await limiter.AcquireAsync(Burst(1_000), CancellationToken.None);
 
         var waiting = limiter.AcquireAsync(10_000, CancellationToken.None).AsTask();
         limiter.UpdateLimit(10_000);
-        time.Advance(TimeSpan.FromSeconds(1));
-        await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+        await PumpUntilCompleted(waiting, time, TimeSpan.FromSeconds(2));
+    }
+
+    private static int Burst(long bytesPerSecond) => (int)Math.Max(1, bytesPerSecond * 0.25);
+
+    private static async Task PumpUntilCompleted(Task task, ControllableTimeProvider time, TimeSpan max)
+    {
+        var maxSteps = Math.Max(1, (int)(max.TotalMilliseconds / 50) + 1);
+        for (var step = 0; !task.IsCompleted && step < maxSteps; step++)
+            time.Advance(TimeSpan.FromMilliseconds(50));
+
+        await task.WaitAsync(TimeSpan.FromSeconds(2));
     }
 }

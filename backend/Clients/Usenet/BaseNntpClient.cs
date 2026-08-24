@@ -36,18 +36,18 @@ public class BaseNntpClient : NntpClient
     public BaseNntpClient(bool skipTlsVerification, bool applyBandwidthLimit = true)
         : this(new UsenetClient(new UsenetClientOptions
 #pragma warning restore CA2000
-    {
-        CrcValidation = EnvironmentUtil.GetEnvironmentVariable("USENET_DISABLE_CRC_VALIDATION") == "1"
+        {
+            CrcValidation = EnvironmentUtil.GetEnvironmentVariable("USENET_DISABLE_CRC_VALIDATION") == "1"
             ? YencCrcValidationMode.Off
             : YencCrcValidationMode.WhenPresent,
-        SkipTlsVerification = skipTlsVerification,
-        DecodedBodyBufferedBytesObserver = static delta =>
-            InFlightArticleBudget.Current?.AccountBufferedPipeBytes(delta),
-        PayloadBandwidthAcquirer = applyBandwidthLimit
+            SkipTlsVerification = skipTlsVerification,
+            DecodedBodyBufferedBytesObserver = static delta =>
+                InFlightArticleBudget.Current?.AccountBufferedPipeBytes(delta),
+            PayloadBandwidthAcquirer = applyBandwidthLimit
             ? static (bytes, ct) =>
                 UsenetBandwidthLimiter.Current?.AcquireAsync(bytes, ct) ?? ValueTask.CompletedTask
             : null,
-    }))
+        }))
     {
     }
 
