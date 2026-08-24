@@ -5,15 +5,27 @@ import type {
 } from "~/clients/backend-client.server";
 import { formatBytes, formatNumber, formatPercent, formatSpeed } from "../../utils/format";
 import { settingsPath } from "~/navigation/settings-tabs";
-import { Tooltip } from "~/components/ui";
+import { Icon, Tooltip } from "~/components/ui";
 import { WidgetLink } from "../widget-link/widget-link";
+import { ProviderSpeedChart } from "../provider-speed-chart/provider-speed-chart";
 
 export type ProviderScoreboardProps = {
   providers: ProviderRow[];
   window: OverviewWindow;
+  selectedProvider?: string | null;
+  onSelectProvider?: (provider: string | null) => void;
+  providerSpeedBucketSizeMs?: number;
+  providerSpeedHistoryTruncated?: boolean;
 };
 
-export function ProviderScoreboard({ providers, window }: ProviderScoreboardProps) {
+export function ProviderScoreboard({
+  providers,
+  window,
+  selectedProvider = null,
+  onSelectProvider,
+  providerSpeedBucketSizeMs = 900_000,
+  providerSpeedHistoryTruncated = false,
+}: ProviderScoreboardProps) {
   const total = providers.reduce((s, p) => s + p.articles, 0);
   const hasOpenCircuit = providers.some(
     (p) => p.circuitState === "open" || p.circuitState === "halfOpen",
@@ -21,6 +33,7 @@ export function ProviderScoreboard({ providers, window }: ProviderScoreboardProp
   const outageHelp = `Circuit-open time per ${outageIntervalLabel(window)} interval on a fixed 0–100% scale. Brief trips use a minimum-height tick.`;
   const speedHelp =
     "Historical average: bytes fetched divided by summed successful fetch durations over the selected window. Durations include connection-pool wait and overlap across concurrent fetches, so this is not wall-clock aggregate bandwidth. Use the provider benchmark for line-rate calibration.";
+  const selected = providers.find((p) => p.provider === selectedProvider);
 
   return (
     <section className="card w-full min-w-0 border border-base-content/10 bg-base-100 shadow-sm">
@@ -46,6 +59,7 @@ export function ProviderScoreboard({ providers, window }: ProviderScoreboardProp
         {providers.length === 0 ? (
           <p className="py-6 text-center text-xs text-base-content/50">No providers configured.</p>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="table table-pin-cols table-sm min-w-[800px]">
               <thead>
@@ -81,23 +95,41 @@ export function ProviderScoreboard({ providers, window }: ProviderScoreboardProp
                   return (
                     <tr key={p.provider}>
                       <th scope="row" className="bg-base-100 font-medium">
-                        <Tooltip content={buildProviderTooltip(p, circuitState)}>
-                          <div className="flex max-w-[240px] min-w-0 items-center gap-2 font-medium">
-                            <span
-                              className={`status status-xs shrink-0 ${statusClass(circuitState)}`}
-                            />
-                            <span className="min-w-0 truncate">
-                              {p.nickname?.trim() || p.provider}
-                            </span>
-                            {circuitState !== "closed" && (
+                        <div className="flex max-w-[260px] min-w-0 items-center gap-1">
+                          <Tooltip content={buildProviderTooltip(p, circuitState)}>
+                            <div className="flex min-w-0 items-center gap-2 font-medium">
                               <span
-                                className={`badge badge-sm shrink-0 ${badgeClass(circuitState)}`}
-                              >
-                                {circuitLabel(circuitState, p.cooldownRemainingSeconds)}
+                                className={`status status-xs shrink-0 ${statusClass(circuitState)}`}
+                              />
+                              <span className="min-w-0 truncate">
+                                {p.nickname?.trim() || p.provider}
                               </span>
-                            )}
-                          </div>
-                        </Tooltip>
+                              {circuitState !== "closed" && (
+                                <span
+                                  className={`badge badge-sm shrink-0 ${badgeClass(circuitState)}`}
+                                >
+                                  {circuitLabel(circuitState, p.cooldownRemainingSeconds)}
+                                </span>
+                              )}
+                            </div>
+                          </Tooltip>
+                          {onSelectProvider && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs shrink-0"
+                              aria-expanded={selectedProvider === p.provider}
+                              aria-controls="provider-speed-chart"
+                              aria-label={`Show speed history for ${p.nickname?.trim() || p.provider}`}
+                              onClick={() =>
+                                onSelectProvider(
+                                  selectedProvider === p.provider ? null : p.provider,
+                                )
+                              }
+                            >
+                              <Icon name="monitoring" className="!text-[16px]" />
+                            </button>
+                          )}
+                        </div>
                       </th>
                       <td>
                         <Sparkline values={p.spark} tone="success" />
@@ -159,6 +191,18 @@ export function ProviderScoreboard({ providers, window }: ProviderScoreboardProp
               </tbody>
             </table>
           </div>
+          {selected && (
+            <div id="provider-speed-chart">
+              <ProviderSpeedChart
+                providerLabel={selected.nickname?.trim() || selected.provider}
+                points={selected.speedSeries ?? []}
+                bucketSizeMs={providerSpeedBucketSizeMs}
+                historyTruncated={providerSpeedHistoryTruncated}
+                window={window}
+              />
+            </div>
+          )}
+        </>
         )}
       </div>
     </section>
