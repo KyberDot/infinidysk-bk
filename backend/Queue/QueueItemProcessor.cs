@@ -148,14 +148,9 @@ public class QueueItemProcessor(
     internal static string? SelectMidpointPreflightSegment(
         IReadOnlyList<IReadOnlyList<string>> segmentsByFile)
     {
-        IReadOnlyList<string>? candidate = null;
-        foreach (var file in segmentsByFile)
-        {
-            if (file.Count < 2) continue;
-            if (candidate is null || file.Count > candidate.Count)
-                candidate = file;
-        }
-
+        var candidate = segmentsByFile
+            .Where(file => file.Count >= 2)
+            .MaxBy(file => file.Count);
         return candidate?[candidate.Count / 2];
     }
 

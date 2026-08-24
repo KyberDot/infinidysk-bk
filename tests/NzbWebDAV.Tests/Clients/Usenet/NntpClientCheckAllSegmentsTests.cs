@@ -57,9 +57,10 @@ public class NntpClientCheckAllSegmentsTests
         var extraIds = new[] { "extra-0", "extra-1", "extra-2" };
         var client = new CoordinatedStatClient(failId, expectedSlowStarts: slowIds.Length);
         var ids = slowIds.Concat([failId]).Concat(extraIds).ToArray();
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         var exception = await Assert.ThrowsAsync<UsenetArticleNotFoundException>(() =>
-            client.CheckAllSegmentsAsync(ids, concurrency: 4, progress: null, CancellationToken.None));
+            client.CheckAllSegmentsAsync(ids, concurrency: 4, progress: null, timeoutCts.Token));
 
         Assert.Equal(failId, exception.SegmentId);
         Assert.Equal(0, client.StatStartsAfterFailure);

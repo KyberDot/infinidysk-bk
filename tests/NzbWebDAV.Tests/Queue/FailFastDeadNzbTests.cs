@@ -4,6 +4,7 @@ using NzbWebDAV.Queue;
 using NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
 using NzbWebDAV.Services;
+using NzbWebDAV.Tests.Fakes;
 
 namespace NzbWebDAV.Tests.Queue;
 
@@ -99,7 +100,7 @@ public class FailFastDeadNzbTests
     [Fact]
     public void FailMissingImportantFile_CachesSegmentAndThrowsNonRetryable()
     {
-        var segmentId = $"cache-me-{Guid.NewGuid():N}@example.com";
+        const string segmentId = "cache-me-dead-nzb-fail-fast@example.com";
         var nzbFile = new NzbFile
         {
             Subject = "\"dead.rar\" yEnc (1/1)",
@@ -115,14 +116,29 @@ public class FailFastDeadNzbTests
     }
 
     [Fact]
-    public void MidpointMiss_UsesSameNonRetryableCachePath()
+    public async Task MidpointMiss_CachesProbedIdThroughProductionPreflightAndHandler()
     {
-        var segmentId = $"midpoint-{Guid.NewGuid():N}@example.com";
-        var exception = new UsenetArticleNotFoundException(segmentId);
+        IReadOnlyList<IReadOnlyList<string>> files = [["video-0", "video-1", "video-2", "video-3"]];
+        var articles = QueueItemProcessor.SelectArticlesForExistenceCheck(files, "full");
+        var probeId = QueueItemProcessor.SelectMidpointPreflightSegment(files);
+        Assert.Equal("video-2", probeId);
+        Assert.NotNull(probeId);
+
+        var available = articles
+            .Where(id => id != probeId)
+            .ToDictionary(id => id, _ => Array.Empty<byte>());
+        var client = new FakeNntpClient(available);
+
+        var exception = await Assert.ThrowsAsync<UsenetArticleNotFoundException>(() =>
+            QueueItemProcessor.CheckExistenceWithOptionalMidpointPreflightAsync(
+                client, files, articles, "full", healthCheckConcurrency: 4,
+                part3Progress: null, CancellationToken.None));
+
+        Assert.Equal(probeId, exception.SegmentId);
         Assert.IsAssignableFrom<NonRetryableDownloadException>(exception);
 
         HealthCheckService.AddMissingSegmentIds([exception.SegmentId]);
         Assert.Throws<UsenetArticleNotFoundException>(() =>
-            HealthCheckService.CheckCachedMissingSegmentIds([segmentId]));
+            HealthCheckService.CheckCachedMissingSegmentIds([probeId]));
     }
 }
