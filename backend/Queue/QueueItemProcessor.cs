@@ -620,6 +620,7 @@ public class QueueItemProcessor(
             // post-processing
             new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
             new BlocklistedFilePostProcessor(configManager, dbClient).RemoveFilteredFiles();
+            new RenameSingleVideoPostProcessor(configManager, dbClient).RenameToReleaseName(mountFolder);
 
             // validate media files found
             if (configManager.IsEnsureImportableMediaEnabled())
