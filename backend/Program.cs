@@ -300,6 +300,19 @@ public partial class Program
                     };
                     return budget;
                 })
+                .AddSingleton(sp =>
+                {
+                    var cfg = sp.GetRequiredService<ConfigManager>();
+                    var limiter = new UsenetBandwidthLimiter();
+                    limiter.UpdateLimit(cfg.GetUsenetBandwidthLimitBytesPerSecond());
+                    UsenetBandwidthLimiter.Current = limiter;
+                    cfg.OnConfigChanged += (_, args) =>
+                    {
+                        if (args.ChangedConfig.ContainsKey(ConfigKeys.UsenetBandwidthLimitMbps))
+                            limiter.UpdateLimit(cfg.GetUsenetBandwidthLimitBytesPerSecond());
+                    };
+                    return limiter;
+                })
                 .AddSingleton<SupportPackService>()
                 .AddSingleton<BenchmarkGate>()
                 .AddSingleton<NzbWebDAV.Services.Benchmark.BenchmarkRunControl>()
@@ -392,6 +405,8 @@ public partial class Program
                 .AddHostedService<SqliteMaintenanceService>()
                 .AddSingleton<LiveStatsBroadcaster>()
                 .AddHostedService(sp => sp.GetRequiredService<LiveStatsBroadcaster>())
+                .AddSingleton<BandwidthLimitBroadcaster>()
+                .AddHostedService(sp => sp.GetRequiredService<BandwidthLimitBroadcaster>())
                 .AddSingleton<ArrReplacementSearchBudget>()
                 .AddHostedService<HealthCheckService>()
                 .AddHostedService<HealthCheckRetentionService>()

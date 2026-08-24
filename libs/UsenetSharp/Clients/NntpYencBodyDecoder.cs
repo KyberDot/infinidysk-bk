@@ -38,6 +38,7 @@ internal sealed class NntpYencBodyDecoder(
             var phase = BodyPhase.SeekingYBegin;
             var isMultipart = false;
             long drainedBytes = 0;
+            var pendingDrainCharge = 0;
             long skippedBytes = 0;
             var ybeginLength = 0;
             var yendLength = 0;
@@ -71,9 +72,33 @@ internal sealed class NntpYencBodyDecoder(
                     return;
                 }
 
+                if (options.PayloadBandwidthAcquirer is { } acquire)
+                {
+                    await acquire(unflushedDecodedBytes, cancellationToken).ConfigureAwait(false);
+                }
+
                 var result = await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
                 unflushedDecodedBytes = 0;
                 shouldWrite = !result.IsCompleted && !result.IsCanceled;
+            }
+
+            async ValueTask ChargePendingDrainAsync()
+            {
+                if (pendingDrainCharge <= 0 || options.PayloadBandwidthAcquirer is not { } acquire)
+                {
+                    pendingDrainCharge = 0;
+                    return;
+                }
+
+                var remaining = pendingDrainCharge;
+                pendingDrainCharge = 0;
+                const int chunk = 64 * 1024;
+                while (remaining > 0)
+                {
+                    var n = Math.Min(remaining, chunk);
+                    await acquire(n, cancellationToken).ConfigureAwait(false);
+                    remaining -= n;
+                }
             }
 
             while (true)
@@ -144,6 +169,7 @@ internal sealed class NntpYencBodyDecoder(
                         {
                             payloadStart = -1;
                             drainedBytes += contentLength + 2;
+                            pendingDrainCharge += contentLength + 2;
                             if (drainedBytes > options.AbandonedBodyDrainLimit)
                             {
                                 consume = rawStart + rawLength;
@@ -295,7 +321,14 @@ internal sealed class NntpYencBodyDecoder(
 
                     break;
                 }
+
+                if (pendingDrainCharge >= 64 * 1024)
+                {
+                    await ChargePendingDrainAsync().ConfigureAwait(false);
+                }
             }
+
+            await ChargePendingDrainAsync().ConfigureAwait(false);
         }
         finally
         {

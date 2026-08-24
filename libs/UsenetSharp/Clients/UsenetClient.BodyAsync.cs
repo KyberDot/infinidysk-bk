@@ -336,6 +336,7 @@ public partial class UsenetClient
 
             var shouldWrite = true;
             long drainedBytes = 0;
+            var pendingDrainCharge = 0;
             var unflushed = 0;
             var cancellationToken = operationCts.Token;
             using var readTimeout = new CoalescedReadTimeout(_options.ReadTimeout, _timeProvider, cancellationToken);
@@ -371,10 +372,18 @@ public partial class UsenetClient
                 if (!shouldWrite)
                 {
                     drainedBytes += line.Length + 2;
+                    pendingDrainCharge += line.Length + 2;
                     if (drainedBytes > _options.AbandonedBodyDrainLimit)
                     {
                         throw new UsenetProtocolException(
                             "The abandoned NNTP body exceeded the configured drain limit.");
+                    }
+
+                    if (pendingDrainCharge >= 64 * 1024)
+                    {
+                        await ChargePayloadBandwidthAsync(pendingDrainCharge, cancellationToken)
+                            .ConfigureAwait(false);
+                        pendingDrainCharge = 0;
                     }
 
                     continue;
@@ -398,6 +407,7 @@ public partial class UsenetClient
                 // first-byte latency acceptable for small-header readers.
                 if (unflushed >= RawBodyFlushThreshold)
                 {
+                    await ChargePayloadBandwidthAsync(unflushed, cancellationToken).ConfigureAwait(false);
                     var result = await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
                     unflushed = 0;
                     if (result.IsCompleted || result.IsCanceled)
@@ -407,8 +417,15 @@ public partial class UsenetClient
                 }
             }
 
+            if (pendingDrainCharge > 0)
+            {
+                await ChargePayloadBandwidthAsync(pendingDrainCharge, cancellationToken).ConfigureAwait(false);
+                pendingDrainCharge = 0;
+            }
+
             if (shouldWrite && unflushed > 0)
             {
+                await ChargePayloadBandwidthAsync(unflushed, cancellationToken).ConfigureAwait(false);
                 var result = await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
                 if (result.IsCompleted || result.IsCanceled)
                 {
@@ -462,6 +479,7 @@ public partial class UsenetClient
             using var drainCts = CreateOperationTokenSource(CancellationToken.None);
             using var readTimeout = new CoalescedReadTimeout(_options.ReadTimeout, _timeProvider, drainCts.Token);
             long drainedBytes = 0;
+            var pendingCharge = 0;
 
             while (true)
             {
@@ -485,14 +503,26 @@ public partial class UsenetClient
                 var bytes = line.Value.Span;
                 if (bytes.Length == 1 && bytes[0] == (byte)'.')
                 {
+                    if (pendingCharge > 0)
+                    {
+                        await ChargePayloadBandwidthAsync(pendingCharge, drainCts.Token).ConfigureAwait(false);
+                    }
+
                     return null;
                 }
 
                 drainedBytes += bytes.Length + 2;
+                pendingCharge += bytes.Length + 2;
                 if (drainedBytes > _options.AbandonedBodyDrainLimit)
                 {
                     return new UsenetProtocolException(
                         "The cancelled NNTP body exceeded the configured drain limit.");
+                }
+
+                if (pendingCharge >= 64 * 1024)
+                {
+                    await ChargePayloadBandwidthAsync(pendingCharge, drainCts.Token).ConfigureAwait(false);
+                    pendingCharge = 0;
                 }
             }
         }

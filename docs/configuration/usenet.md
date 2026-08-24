@@ -53,6 +53,15 @@ Legacy keys `usenet.pipelining.enabled` / `usenet.pipelining.depth` remain honor
 
 Run Auto-tune before enabling queue pipelining. WebDAV streaming batching is a **separate** toggle on [Streaming](streaming.md).
 
+## Global download cap [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since }
+
+`usenet.bandwidth-limit-mbps` (Streaming settings) caps total live Usenet payload
+ingress from every provider, in megabits per second. Queue downloads and WebDAV
+streaming share the cap. Cache hits, LAN delivery, and the provider speed
+benchmark are not limited. Empty or `0` means unlimited; the value reloads
+without restart. 1 MB/s = 8 Mbit/s. The cap cannot make a latency-limited
+provider faster.
+
 See [NNTP pipelining](../features/nntp-pipelining.md) and [Multi-provider](../features/multi-provider.md).
 
 ## Article-miss negative cache [since 0.9.0](https://github.com/infinidysk/infinidysk/releases/tag/v0.9.0){ .nzbdav-since }

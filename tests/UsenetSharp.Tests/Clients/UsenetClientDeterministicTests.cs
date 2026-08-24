@@ -208,6 +208,47 @@ public class UsenetClientDeterministicTests
     }
 
     [Test]
+    public async Task BodyAsync_PayloadBandwidthAcquirer_ChargesWrittenBytes()
+    {
+        var charged = 0;
+        await using var server = new ScriptedNntpServer(async (_, writer, _) =>
+            await writer.WriteAsync("222 body follows\r\nhello\r\n.\r\n"));
+        await using var client = new UsenetClient(new UsenetClientOptions
+        {
+            PayloadBandwidthAcquirer = (bytes, _) =>
+            {
+                Interlocked.Add(ref charged, bytes);
+                return ValueTask.CompletedTask;
+            }
+        });
+        await client.ConnectAsync("127.0.0.1", server.Port, false, CancellationToken.None);
+
+        var response = await client.BodyAsync("article@example.com", CancellationToken.None);
+        using var reader = new StreamReader(response.Stream!, Encoding.Latin1);
+        Assert.That(await reader.ReadToEndAsync(), Is.EqualTo("hello\r\n"));
+        Assert.That(charged, Is.EqualTo("hello\r\n".Length));
+    }
+
+    [Test]
+    public async Task BodyAsync_SlowPayloadAcquirer_DoesNotTripReadTimeout()
+    {
+        await using var server = new ScriptedNntpServer(async (_, writer, _) =>
+            await writer.WriteAsync("222 body follows\r\nhello\r\n.\r\n"));
+        await using var client = new UsenetClient(new UsenetClientOptions
+        {
+            ReadTimeout = TimeSpan.FromMilliseconds(200),
+            PayloadBandwidthAcquirer = async (_, _) =>
+                await Task.Delay(TimeSpan.FromMilliseconds(500))
+        });
+        await client.ConnectAsync("127.0.0.1", server.Port, false, CancellationToken.None);
+
+        var response = await client.BodyAsync("article@example.com", CancellationToken.None);
+        using var reader = new StreamReader(response.Stream!, Encoding.Latin1);
+        Assert.That(await reader.ReadToEndAsync(), Is.EqualTo("hello\r\n"));
+        Assert.That(client.IsHealthy, Is.True);
+    }
+
+    [Test]
     public async Task BodyAsync_PreservesLatin1BytesWithoutTranscoding()
     {
         var bodyCharacters = new[] { '\0', '\x01', '\x7f', '\x80', '\xff' };
@@ -2804,6 +2845,98 @@ public class UsenetClientDeterministicTests
         var date = await client.DateAsync(CancellationToken.None);
         Assert.That(date.ResponseCode, Is.EqualTo((int)UsenetResponseType.DateAndTime));
         Assert.That(client.IsHealthy, Is.True);
+    }
+
+    [Test]
+    public async Task BodyAsync_CallerCancellation_ChargesDrainBytes()
+    {
+        var charged = 0;
+        var firstLineSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continueBody = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var server = new ScriptedNntpServer(async (command, writer, _) =>
+        {
+            if (command.StartsWith("BODY", StringComparison.Ordinal))
+            {
+                await writer.WriteAsync("222 body follows\r\nfirst\r\n");
+                firstLineSent.SetResult();
+                await continueBody.Task;
+                await writer.WriteAsync("second\r\n.\r\n");
+            }
+            else if (command == "DATE")
+            {
+                await writer.WriteLineAsync("111 20260709213000");
+            }
+        });
+        await using var client = new UsenetClient(new UsenetClientOptions
+        {
+            ReadTimeout = TimeSpan.FromSeconds(1),
+            AbandonedBodyDrainLimit = 1024,
+            PayloadBandwidthAcquirer = (bytes, _) =>
+            {
+                Interlocked.Add(ref charged, bytes);
+                return ValueTask.CompletedTask;
+            }
+        });
+        await client.ConnectAsync("127.0.0.1", server.Port, false, CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var completion = new TaskCompletionSource<ArticleBodyResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var response = await client.BodyAsync("article@example.com", (result, _) => completion.SetResult(result), cts.Token);
+        var copyTask = response.Stream!.CopyToAsync(Stream.Null);
+        await firstLineSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+        cts.Cancel();
+        continueBody.SetResult();
+
+        Assert.ThrowsAsync<OperationCanceledException>(async () => await copyTask);
+        Assert.That(await completion.Task.WaitAsync(TimeSpan.FromSeconds(2)),
+            Is.EqualTo(ArticleBodyResult.NotRetrieved));
+        await client.DateAsync(CancellationToken.None);
+        Assert.That(charged, Is.GreaterThan("first\r\n".Length));
+        Assert.That(client.IsHealthy, Is.True);
+    }
+
+    [Test]
+    public async Task BodyAsync_AbandonConnection_DoesNotChargeUndrainedRemainder()
+    {
+        var charged = 0;
+        var firstLineSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var server = new ScriptedNntpServer(async (_, writer, cancellationToken) =>
+        {
+            await writer.WriteAsync("222 body follows\r\nfirst\r\n");
+            firstLineSent.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        });
+        await using var client = new UsenetClient(new UsenetClientOptions
+        {
+            ReadTimeout = TimeSpan.FromSeconds(5),
+            CancellationPolicy = ConnectionReleasePolicy.AbandonConnection,
+            PayloadBandwidthAcquirer = (bytes, _) =>
+            {
+                Interlocked.Add(ref charged, bytes);
+                return ValueTask.CompletedTask;
+            }
+        });
+        await client.ConnectAsync("127.0.0.1", server.Port, false, CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var completion = new TaskCompletionSource<ArticleBodyResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var response = await client.BodyAsync(
+            "article@example.com", (result, _) => completion.SetResult(result), cts.Token);
+        var copyTask = response.Stream!.CopyToAsync(Stream.Null);
+        await firstLineSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+        var chargedAtCancel = Volatile.Read(ref charged);
+        cts.Cancel();
+
+        Assert.ThrowsAsync<OperationCanceledException>(async () => await copyTask);
+        Assert.That(await completion.Task.WaitAsync(TimeSpan.FromSeconds(2)),
+            Is.EqualTo(ArticleBodyResult.NotRetrieved));
+        await Task.Delay(100);
+        Assert.That(Volatile.Read(ref charged), Is.EqualTo(chargedAtCancel));
+        Assert.That(client.IsHealthy, Is.False);
     }
 
     [Test]

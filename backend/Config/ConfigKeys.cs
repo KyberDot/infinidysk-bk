@@ -80,6 +80,7 @@ public static class ConfigKeys
     public const string UsenetSharedStreamsRingMb = "usenet.shared-streams.ring-mb";
     public const string UsenetSharedStreamsGraceSeconds = "usenet.shared-streams.grace-seconds";
     public const string UsenetSharedStreamsSmallRangeMaxMb = "usenet.shared-streams.small-range-max-mb";
+    public const string UsenetBandwidthLimitMbps = "usenet.bandwidth-limit-mbps";
 
     // webdav
     public const string WebdavEnforceReadonly = "webdav.enforce-readonly";

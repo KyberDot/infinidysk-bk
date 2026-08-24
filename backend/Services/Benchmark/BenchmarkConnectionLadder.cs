@@ -31,7 +31,8 @@ internal sealed class BenchmarkConnectionLadder(UsenetProviderConfig.ConnectionD
             {
                 try
                 {
-                    conn = await UsenetStreamingClient.CreateNewConnection(provider, ct).ConfigureAwait(false);
+                    conn = await UsenetStreamingClient.CreateNewConnection(
+                        provider, ct, applyBandwidthLimit: false).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {

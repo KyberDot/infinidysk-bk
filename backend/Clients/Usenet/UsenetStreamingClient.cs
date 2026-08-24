@@ -409,10 +409,13 @@ public class UsenetStreamingClient : WrappingNntpClient
     public static ValueTask<INntpClient> CreateNewConnection
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
-        CancellationToken ct
+        CancellationToken ct,
+        bool applyBandwidthLimit = true
     ) => CreateNewConnection(
         connectionDetails,
-        () => new BaseNntpClient(connectionDetails.UseSsl && connectionDetails.SkipTlsVerification),
+        () => new BaseNntpClient(
+            connectionDetails.UseSsl && connectionDetails.SkipTlsVerification,
+            applyBandwidthLimit),
         ct);
 
     internal static async ValueTask<INntpClient> CreateNewConnection

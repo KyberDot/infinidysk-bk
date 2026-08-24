@@ -417,6 +417,10 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
                     RequireLong(item.ConfigName, value);
                     break;
 
+                case ConfigKeys.UsenetBandwidthLimitMbps:
+                    RequireNonNegativeFiniteDouble(item.ConfigName, value);
+                    break;
+
                 case ConfigKeys.ProwlarrSyncIntervalMinutes:
                     RequireLongInRange(item.ConfigName, value, 5, 10080);
                     break;
@@ -542,6 +546,17 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
         {
             if (!long.TryParse(value, out _))
                 throw new ArgumentException($"Config value for '{key}' must be a whole number, but was '{value}'.");
+        }
+
+        void RequireNonNegativeFiniteDouble(string key, string value)
+        {
+            if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                || !double.IsFinite(parsed)
+                || parsed < 0)
+            {
+                throw new ArgumentException(
+                    $"Config value for '{key}' must be a non-negative finite number, but was '{value}'.");
+            }
         }
 
         void RequireNonNegativeInt(string key, string value)
@@ -898,8 +913,8 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
 
     /// <summary>
     /// SAB-compatible speed limit in KB/s set via <c>mode=speedlimit</c>. 0 means
-    /// unlimited. Accepted and stored for Arr/API compatibility; actual byte/s
-    /// throttling is tracked separately (see #375).
+    /// unlimited. Accepted and stored for Arr/API compatibility; live Usenet
+    /// payload throttling uses <see cref="GetUsenetBandwidthLimitBytesPerSecond"/>.
     /// </summary>
     public int GetSabSpeedLimitKbps()
     {
@@ -1006,6 +1021,28 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
 
     public long GetInFlightArticleBudgetBytes() =>
         (long)GetInFlightArticleBudgetMb() * 1024L * 1024L;
+
+    /// <summary>
+    /// Process-wide Usenet payload ingress cap in bytes/second. Missing, blank, or
+    /// 0 means unlimited. 1 Mbit/s = 125,000 bytes/s. Values above 100 Gbit/s are capped.
+    /// </summary>
+    public long GetUsenetBandwidthLimitBytesPerSecond()
+    {
+        var v = StringUtil.EmptyToNull(GetConfigValue(ConfigKeys.UsenetBandwidthLimitMbps));
+        if (v is null
+            || !double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var mbps)
+            || !double.IsFinite(mbps)
+            || mbps <= 0)
+        {
+            return 0;
+        }
+
+        var bytesPerSecond = mbps * 125_000d;
+        const double cap = 100_000d * 125_000d;
+        if (bytesPerSecond > cap)
+            bytesPerSecond = cap;
+        return (long)bytesPerSecond;
+    }
 
     /// <summary>
     /// Idle timeout for pooled NNTP connections. Default 60s; clamped to [15, 300].

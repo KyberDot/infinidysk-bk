@@ -19,6 +19,7 @@ public class WebsocketTopic
     public static readonly WebsocketTopic HealthItemStatus = new("hs", TopicType.State, isKeyed: true);
     public static readonly WebsocketTopic HealthItemProgress = new("hp", TopicType.State, isKeyed: true);
     public static readonly WebsocketTopic LiveStats = new("ls", TopicType.State);
+    public static readonly WebsocketTopic BandwidthLimit = new("bwl", TopicType.State);
     public static readonly WebsocketTopic BenchmarkProgress = new("bench", TopicType.State);
     public static readonly WebsocketTopic StreamTracing = new("strt", TopicType.State);
 

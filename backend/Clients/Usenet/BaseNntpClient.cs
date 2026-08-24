@@ -33,7 +33,8 @@ public class BaseNntpClient : NntpClient
     }
 
 #pragma warning disable CA2000 // the client is stored in _client and disposed with this instance
-    public BaseNntpClient(bool skipTlsVerification) : this(new UsenetClient(new UsenetClientOptions
+    public BaseNntpClient(bool skipTlsVerification, bool applyBandwidthLimit = true)
+        : this(new UsenetClient(new UsenetClientOptions
 #pragma warning restore CA2000
     {
         CrcValidation = EnvironmentUtil.GetEnvironmentVariable("USENET_DISABLE_CRC_VALIDATION") == "1"
@@ -42,6 +43,10 @@ public class BaseNntpClient : NntpClient
         SkipTlsVerification = skipTlsVerification,
         DecodedBodyBufferedBytesObserver = static delta =>
             InFlightArticleBudget.Current?.AccountBufferedPipeBytes(delta),
+        PayloadBandwidthAcquirer = applyBandwidthLimit
+            ? static (bytes, ct) =>
+                UsenetBandwidthLimiter.Current?.AcquireAsync(bytes, ct) ?? ValueTask.CompletedTask
+            : null,
     }))
     {
     }
