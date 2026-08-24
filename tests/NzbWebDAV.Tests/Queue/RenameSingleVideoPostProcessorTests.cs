@@ -76,6 +76,17 @@ public class RenameSingleVideoPostProcessorTests : IDisposable
     }
 
     [Fact]
+    public void FolderExtensionDifferentCasing_UsesSourceExtension()
+    {
+        var mount = SeedDirectory("Release.MKV");
+        var video = SeedNzbFile(mount, "video.mkv");
+
+        new RenameSingleVideoPostProcessor(_config, _dbClient).RenameToReleaseName(mount);
+
+        Assert.Equal("Release.mkv", video.Name);
+    }
+
+    [Fact]
     public void NumericExtension_IsNotRenamed()
     {
         var mount = SeedDirectory("Release.Name.2026");

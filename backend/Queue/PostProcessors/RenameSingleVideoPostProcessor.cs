@@ -34,9 +34,10 @@ public class RenameSingleVideoPostProcessor(ConfigManager configManager, DavData
         if (extension.Length <= 1 || extensionDigitsOnly) return;
 
         var baseName = mountFolder.Name;
-        var newName = baseName.EndsWith(extension, StringComparison.OrdinalIgnoreCase)
-            ? PathSanitizer.SanitizeComponent(baseName)
-            : PathSanitizer.SanitizeComponent(baseName + extension);
+        var releaseBaseName = baseName.EndsWith(extension, StringComparison.OrdinalIgnoreCase)
+            ? baseName[..^extension.Length]
+            : baseName;
+        var newName = PathSanitizer.SanitizeComponent(releaseBaseName + extension);
         if (string.Equals(newName, video.Name, StringComparison.Ordinal)) return;
 
         if (SiblingNameTaken(video, newName))
