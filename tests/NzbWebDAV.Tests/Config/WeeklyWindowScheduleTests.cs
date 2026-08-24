@@ -1,6 +1,9 @@
 using NzbWebDAV.Config;
 using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database.Models;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace NzbWebDAV.Tests.Config;
 
@@ -94,5 +97,85 @@ public class WeeklyWindowScheduleTests
 
         Assert.True(config.IsQueueEffectivelyPaused(utcNow));
         Assert.Equal("11", config.GetQueuePauseInt(utcNow));
+    }
+
+    [Fact]
+    public async Task ConfigManager_InvalidStoredSchedule_LogsOnceUnderConcurrency()
+    {
+        var config = ConfigWithSchedule("{bad");
+        var sink = new CollectingSink();
+        var previous = Log.Logger;
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Warning()
+            .WriteTo.Sink(sink)
+            .CreateLogger();
+        try
+        {
+            await Task.WhenAll(Enumerable.Range(0, 32).Select(_ =>
+                Task.Run(config.GetQueueProcessingSchedule)));
+            Assert.Equal(1, sink.Events.Count(IsInvalidScheduleWarning));
+        }
+        finally
+        {
+            Log.Logger = previous;
+        }
+    }
+
+    [Fact]
+    public void ConfigManager_InvalidStoredSchedule_LogsAgainWhenRawChanges()
+    {
+        var config = ConfigWithSchedule("{bad");
+        var sink = new CollectingSink();
+        var previous = Log.Logger;
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Warning()
+            .WriteTo.Sink(sink)
+            .CreateLogger();
+        try
+        {
+            config.GetQueueProcessingSchedule();
+            SetSchedule(config, "{also-bad");
+            config.GetQueueProcessingSchedule();
+            Assert.Equal(2, sink.Events.Count(IsInvalidScheduleWarning));
+        }
+        finally
+        {
+            Log.Logger = previous;
+        }
+    }
+
+    private static ConfigManager ConfigWithSchedule(string raw)
+    {
+        var config = new ConfigManager();
+        SetSchedule(config, raw);
+        return config;
+    }
+
+    private static void SetSchedule(ConfigManager config, string raw)
+    {
+        typeof(ConfigManager)
+            .GetField("_config", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(config, new Dictionary<string, string> { [ConfigKeys.QueueProcessingSchedule] = raw });
+    }
+
+    private static bool IsInvalidScheduleWarning(LogEvent logEvent) =>
+        logEvent.MessageTemplate.Text.Contains("Ignoring invalid", StringComparison.Ordinal);
+
+    private sealed class CollectingSink : ILogEventSink
+    {
+        private readonly List<LogEvent> _events = [];
+
+        public IReadOnlyList<LogEvent> Events
+        {
+            get
+            {
+                lock (_events) return _events.ToList();
+            }
+        }
+
+        public void Emit(LogEvent logEvent)
+        {
+            lock (_events) _events.Add(logEvent);
+        }
     }
 }

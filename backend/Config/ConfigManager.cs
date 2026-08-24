@@ -969,12 +969,31 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
             _invalidScheduleWarnings.TryRemove(key, out _);
             return schedule;
         }
-        if (!_invalidScheduleWarnings.TryGetValue(key, out var lastRaw) || lastRaw != raw)
-        {
-            _invalidScheduleWarnings[key] = raw;
+        if (TryMarkInvalidScheduleWarning(key, raw))
             Log.Warning("Ignoring invalid {ConfigKey} schedule. Reason: {Reason}", key, error);
-        }
         return WeeklyWindowSchedule.Unrestricted;
+    }
+
+    /// <summary>
+    /// Returns true only for the caller that installs a new raw value, so concurrent
+    /// status polls do not repeat the same invalid-schedule warning.
+    /// </summary>
+    private bool TryMarkInvalidScheduleWarning(string key, string raw)
+    {
+        while (true)
+        {
+            if (_invalidScheduleWarnings.TryAdd(key, raw))
+                return true;
+
+            if (!_invalidScheduleWarnings.TryGetValue(key, out var lastRaw))
+                continue;
+
+            if (lastRaw == raw)
+                return false;
+
+            if (_invalidScheduleWarnings.TryUpdate(key, raw, lastRaw))
+                return true;
+        }
     }
 
     private static void RequireWeeklyWindowSchedule(string key, string value, JsonSerializerOptions? options)
