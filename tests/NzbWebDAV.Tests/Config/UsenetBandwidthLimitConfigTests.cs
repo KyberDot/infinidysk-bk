@@ -49,6 +49,19 @@ public class UsenetBandwidthLimitConfigTests
     }
 
     [Theory]
+    [InlineData("0.000001")] // 0.125 bytes/s
+    [InlineData("0.000007")] // 0.875 bytes/s
+    public void PositiveBelowOneBytePerSecond_NeverBecomesUnlimited(string value)
+    {
+        var config = new ConfigManager();
+        config.UpdateValues([
+            new ConfigItem { ConfigName = ConfigKeys.UsenetBandwidthLimitMbps, ConfigValue = value },
+        ]);
+
+        Assert.Equal(1, config.GetUsenetBandwidthLimitBytesPerSecond());
+    }
+
+    [Theory]
     [InlineData("0")]
     [InlineData("1.5")]
     [InlineData("100")]

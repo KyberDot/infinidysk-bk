@@ -1129,6 +1129,8 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     /// <summary>
     /// Process-wide Usenet payload ingress cap in bytes/second. Missing, blank, or
     /// 0 means unlimited. 1 Mbit/s = 125,000 bytes/s. Values above 100 Gbit/s are capped.
+    /// Positive values below 1 byte/s round up to 1 byte/s so a configured limit
+    /// never degrades into unlimited throughput.
     /// </summary>
     public long GetUsenetBandwidthLimitBytesPerSecond()
     {
@@ -1145,7 +1147,7 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
         const double cap = 100_000d * 125_000d;
         if (bytesPerSecond > cap)
             bytesPerSecond = cap;
-        return (long)bytesPerSecond;
+        return Math.Max(1L, (long)bytesPerSecond);
     }
 
     /// <summary>
