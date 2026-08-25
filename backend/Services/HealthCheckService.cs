@@ -1671,6 +1671,28 @@ public class HealthCheckService : BackgroundService
                || !_configManager.GetArrConfig().GetArrClients().Any();
     }
 
+    /// <summary>
+    /// Removes a dav-item together with the strm sidecar generated for it.
+    /// The deleter verifies on-disk ownership before deleting and no-ops when the item
+    /// has no generated output. A filesystem failure must not block the repair.
+    /// </summary>
+    internal static void RemoveDavItemWithGeneratedSidecars(DavDatabaseClient dbClient, DavItem davItem)
+    {
+        try
+        {
+            CreateStrmFilesPostProcessor.DeleteStrmFile(davItem);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            Log.Warning(
+                e,
+                "Could not remove the generated strm sidecar for {Path} during health repair. The webdav item is still being removed; the sidecar file may need manual cleanup.",
+                davItem.Path);
+        }
+
+        dbClient.Ctx.Items.Remove(davItem);
+    }
+
     private async Task Repair(
         DavItem davItem,
         DavDatabaseClient dbClient,
@@ -1690,7 +1712,7 @@ public class HealthCheckService : BackgroundService
                     "health-repair",
                     davItem,
                     "health validation failed; filename matches blocklist pattern");
-                dbClient.Ctx.Items.Remove(davItem);
+                RemoveDavItemWithGeneratedSidecars(dbClient, davItem);
                 _failureTracker.ClearFailure(davItem.Id);
                 await RecordHealthResult(
                     dbClient, davItem,
@@ -1724,7 +1746,7 @@ public class HealthCheckService : BackgroundService
                     : "auto-removed after repeated streaming failures";
                 DeletionAuditLog.Record("health-repair", davItem, auditReason);
 
-                dbClient.Ctx.Items.Remove(davItem);
+                RemoveDavItemWithGeneratedSidecars(dbClient, davItem);
                 _failureTracker.ClearFailure(davItem.Id);
 
                 var failureNote = streamingFailureCount is > 0
@@ -1861,7 +1883,7 @@ public class HealthCheckService : BackgroundService
                     "health-repair",
                     davItem,
                     "health validation failed; Arr media removed and original download blocklisted");
-                dbClient.Ctx.Items.Remove(davItem);
+                RemoveDavItemWithGeneratedSidecars(dbClient, davItem);
                 _failureTracker.ClearFailure(davItem.Id);
                 var searchClause = arrDecision is ArrLinkedRepairDecision.RemoveAndBlocklistSucceededSearchWithheld
                     ? "The automatic replacement search was withheld because the per-media search limit was reached."
@@ -1951,7 +1973,7 @@ public class HealthCheckService : BackgroundService
                 "health-repair",
                 davItem,
                 "health validation failed; no Arr media-item after repeated reachable confirmations");
-            dbClient.Ctx.Items.Remove(davItem);
+            RemoveDavItemWithGeneratedSidecars(dbClient, davItem);
             _failureTracker.ClearFailure(davItem.Id);
             var confirmedOrphanUtcNow = DateTimeOffset.UtcNow;
             davItem.LastHealthCheck = confirmedOrphanUtcNow;
