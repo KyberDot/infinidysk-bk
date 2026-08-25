@@ -132,6 +132,9 @@ public partial class Program
             if (args.Contains("--db-migration"))
             {
                 await RunDatabaseMigrationsAsync(args).ConfigureAwait(false);
+                await DatabaseContractWriter
+                    .WriteAsync(SigtermUtil.GetCancellationToken())
+                    .ConfigureAwait(false);
                 return;
             }
 
@@ -151,6 +154,12 @@ public partial class Program
             await using var metricsBootstrap = new MetricsDbContext();
             await StartupDatabaseMigrator
                 .RunAsync(databaseContext, metricsBootstrap, startupCancellationToken)
+                .ConfigureAwait(false);
+
+            // Refresh the machine-readable database contract so external migrators
+            // (DUMB) can pin against the applied migration history.
+            await DatabaseContractWriter
+                .WriteAsync(startupCancellationToken)
                 .ConfigureAwait(false);
 
             // Surface database corruption as one clear event with recovery guidance,
@@ -463,6 +472,9 @@ public partial class Program
             // Must run before anything that reads Scheme/Host/RemoteIpAddress.
             app.UseForwardedHeaders();
             app.UseMiddleware<RequestCorrelationMiddleware>();
+            // Observability wraps exception translation so its counters see the final
+            // status codes that ExceptionMiddleware assigns to WebDAV failures.
+            app.UseMiddleware<WebDavObservabilityMiddleware>();
             app.UseMiddleware<ExceptionMiddleware>();
             app.UseMiddleware<MetricsAuthenticationMiddleware>();
             app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });

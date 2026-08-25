@@ -43,7 +43,7 @@ is saturated.
 | Article Buffer Size | `usenet.article-buffer-size` | `40` | Articles buffered ahead per stream |
 | In-flight article budget (MiB) [since 0.9.0](https://github.com/infinidysk/infinidysk/releases/tag/v0.9.0){ .nzbdav-since } | `usenet.in-flight-article-budget-mb` | auto | Host-wide decoded-byte cap. Auto uses 25% of the detected managed-heap ceiling, clamped to 64–8192 MiB; explicit values also range from 64–8192 MiB |
 | Global Usenet bandwidth limit (Mbit/s) [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since } | `usenet.bandwidth-limit-mbps` | unlimited | Process-wide cap on live provider BODY/ARTICLE payload ingress for queue and WebDAV. Empty or `0` is unlimited. 1 Mbit/s = 125,000 bytes/s. Cache hits and LAN delivery are never limited. Takes effect immediately. A cap cannot raise a latency-limited workload. |
-| Idle connection timeout | `usenet.idle-connection-timeout-seconds` | `60` | Close unused connections after 15–300 seconds |
+| Idle connection timeout | `usenet.idle-connection-timeout-seconds` | `60` | Close unused connections after 15–300 seconds; also sets the [connection warming](../features/connection-warming.md) sweep and keepalive cadence |
 | Batched article downloads | `usenet.pipelined-body-requests` | on | Fetch WebDAV BODY requests in small batches |
 | Streaming batch width [since 1.2.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.2.0){ .nzbdav-since } | `usenet.streaming-body-batch-width` | `4` | Maximum articles per BODY batch (1–8) |
 | Container-aware gap fill [since 0.10.0](https://github.com/infinidysk/infinidysk/releases/tag/v0.10.0){ .nzbdav-since } | `usenet.container-aware-fill` | on | Experimental MPEG-TS null-packet fill for confirmed gaps |

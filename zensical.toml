@@ -47,6 +47,7 @@ nav = [
     { "Watchtower" = "features/watchtower.md" },
     { "Warden, Watchdog, Preflight" = "features/warden-watchdog-preflight.md" },
     { "NNTP pipelining" = "features/nntp-pipelining.md" },
+    { "Connection warming" = "features/connection-warming.md" },
     { "SABnzbd API" = "features/sab-api.md" },
   ]},
   { "Configuration" = [
@@ -86,6 +87,7 @@ nav = [
     { "Retention and cleanup" = "operations/retention-cleanup.md" },
     { "Logs and crash dumps" = "operations/logs-crash-dumps.md" },
     { "Deletion audit" = "operations/deletion-audit.md" },
+    { "Plex re-added episodes" = "operations/plex-readd-diagnosis.md" },
     { "Database corruption" = "operations/database-corruption.md" },
     { "PostgreSQL" = "operations/postgresql.md" },
   ]},

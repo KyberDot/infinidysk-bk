@@ -13,9 +13,12 @@ jobs:
     permissions: {}
     outputs:
       short_sha: ${{ steps.sha.outputs.short_sha }}
+      dev_label: ${{ steps.sha.outputs.dev_label }}
     steps:
       - id: sha
-        run: echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "dev_label=dev-$(date -u +%y%m%d.%H%M)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: resolve
@@ -27,7 +30,7 @@ jobs:
       tags: |
         ghcr.io/${{ github.repository }}:dev
         docker.io/infinidysk/infinidysk:dev
-      nzbdav_version: dev-${{ needs.resolve.outputs.short_sha }}
+      nzbdav_version: ${{ needs.resolve.outputs.dev_label }}
       dockerhub_username: infinidysk
     secrets:
       registry_token: ${{ secrets.GITHUB_TOKEN }}
@@ -44,9 +47,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SHA: ${{ github.sha }}
           SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
+          DEV_LABEL: ${{ needs.resolve.outputs.dev_label }}
         run: |
           set -euo pipefail
-          ROLLING_TITLE="Rolling :dev (dev-${SHORT_SHA})"
+          ROLLING_TITLE="Rolling :dev (${DEV_LABEL})"
           ROLLING_NOTES="Unversioned development snapshot from \`main\` at [\`${SHORT_SHA}\`](https://github.com/${{ github.repository }}/commit/${RELEASE_SHA}). Not a release candidate — use for testing only."
           if gh release view dev --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release edit dev \
@@ -86,6 +90,7 @@ jobs:
 
   announce-dev:
     needs:
+      - resolve
       - build
       - tag-dev
       - assets
@@ -93,25 +98,36 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Post :dev refresh to Discord
         env:
-          DISCORD_DEVELOPMENT_WEBHOOK_URL: ${{ secrets.DISCORD_DEVELOPMENT_WEBHOOK_URL }}
+          DISCORD_ANNOUNCEMENTS_WEBHOOK_URL: ${{ secrets.DISCORD_ANNOUNCEMENTS_WEBHOOK_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.sha }}
           PREVIOUS_SHA: ${{ needs.tag-dev.outputs.previous_sha }}
+          DEV_LABEL: ${{ needs.resolve.outputs.dev_label }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -z "${DISCORD_DEVELOPMENT_WEBHOOK_URL}" ]; then
-            echo "DISCORD_DEVELOPMENT_WEBHOOK_URL secret is not set" >&2
+          if [ -z "${DISCORD_ANNOUNCEMENTS_WEBHOOK_URL}" ]; then
+            echo "DISCORD_ANNOUNCEMENTS_WEBHOOK_URL secret is not set" >&2
             exit 1
           fi
 
-          SHORT_SHA="${SHA:0:7}"
           BASE_LABEL="Changes since last dev build"
+          HAS_COMMITS=false
           if [ -n "${PREVIOUS_SHA}" ] && [ "${PREVIOUS_SHA}" != "${SHA}" ]; then
             CHANGELOG=$(gh api "repos/${REPO}/compare/${PREVIOUS_SHA}...${SHA}" \
               --jq '.commits[] | "- " + (.commit.message | split("\n")[0] | sub(" \\(#[0-9]+\\)$"; ""))')
+            if [ -n "${CHANGELOG}" ]; then
+              HAS_COMMITS=true
+            fi
           elif [ "${PREVIOUS_SHA}" = "${SHA}" ]; then
             CHANGELOG="- (no new commits since last dev build)"
           else
@@ -122,8 +138,17 @@ jobs:
             CHANGELOG="- (no new commits since last dev build)"
           fi
 
-          ANNOUNCEMENT_BODY=$(printf '🛠️ **Dev Branch Update** (version `dev-%s`)\nRelease and downloads: https://github.com/%s/releases/tag/dev\n\n%s\n%s' \
-            "${SHORT_SHA}" "${REPO}" "${BASE_LABEL}" "${CHANGELOG}")
+          SUMMARY=""
+          if [ "${HAS_COMMITS}" = "true" ]; then
+            SUMMARY=$(printf '%s' "$CHANGELOG" | bash .github/scripts/summarize-release-notes.sh --type dev --version "${DEV_LABEL}" || true)
+          fi
+          if [ -n "${SUMMARY}" ]; then
+            ANNOUNCEMENT_BODY=$(printf '🛠️ **Dev Branch Update** (version `%s`)\nRelease and downloads: https://github.com/%s/releases/tag/dev\n\n%s' \
+              "${DEV_LABEL}" "${REPO}" "${SUMMARY}")
+          else
+            ANNOUNCEMENT_BODY=$(printf '🛠️ **Dev Branch Update** (version `%s`)\nRelease and downloads: https://github.com/%s/releases/tag/dev\n\n%s\n%s' \
+              "${DEV_LABEL}" "${REPO}" "${BASE_LABEL}" "${CHANGELOG}")
+          fi
 
           MAX_LEN=1900
           if [ "${#ANNOUNCEMENT_BODY}" -gt "${MAX_LEN}" ]; then
@@ -133,4 +158,4 @@ jobs:
           ESCAPED_BODY=$(printf '%s' "$ANNOUNCEMENT_BODY" | jq -Rsa .)
           curl --fail-with-body -sS -H "Content-Type: application/json" \
             -d "{\"content\": ${ESCAPED_BODY}, \"flags\": 4, \"allowed_mentions\": {\"parse\": []}}" \
-            "$DISCORD_DEVELOPMENT_WEBHOOK_URL"
+            "$DISCORD_ANNOUNCEMENTS_WEBHOOK_URL"
