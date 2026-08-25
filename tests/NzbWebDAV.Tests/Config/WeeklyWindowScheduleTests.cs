@@ -1,12 +1,14 @@
 using NzbWebDAV.Config;
 using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Tests.TestUtils;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
 
 namespace NzbWebDAV.Tests.Config;
 
+[Collection(nameof(GlobalLoggerCollection))]
 public class WeeklyWindowScheduleTests
 {
     private static ConfigItem Item(string name, string value) =>
