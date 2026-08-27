@@ -244,7 +244,15 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         }
     }
 
-    public async Task RemoveQueueItemsAsync
+    /// <summary>
+    /// Cancels in-progress workers and deletes the requested rows. A worker that
+    /// ignores cancellation past <see cref="StuckCancelGracePeriod"/> is
+    /// quarantined: its row, counters, and <see cref="_inProgress"/> entry are
+    /// kept (so no second worker starts for the same id or mount key) and its id
+    /// is returned so callers can surface a failure instead of hanging.
+    /// </summary>
+    /// <returns>Ids whose workers are still running and were not removed.</returns>
+    public async Task<IReadOnlyList<Guid>> RemoveQueueItemsAsync
     (
         List<Guid> queueItemIds,
         DavDatabaseClient dbClient,
@@ -259,31 +267,65 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                 .ToList();
         }, ct).ConfigureAwait(false);
 
-        foreach (var item in toCancel)
+        var stillRunning = await CancelAndAwaitWorkersAsync(toCancel, ct).ConfigureAwait(false);
+
+        var removableIds = queueItemIds.Where(id => !stillRunning.Contains(id)).ToList();
+        if (removableIds.Count > 0)
         {
-            try
+            await LockAsync(async () =>
             {
-                await item.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
-                await item.ProcessingTask.ConfigureAwait(false);
-            }
-#pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
-            catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
-#pragma warning restore CA2016
-            {
-                Log.Debug(e, "Queue item {QueueItemId} exited with error after cancel", item.QueueItem.Id);
-            }
+                await dbClient.RemoveQueueItemsAsync(removableIds, ct).ConfigureAwait(false);
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                foreach (var id in removableIds)
+                {
+                    _retryAttempts.TryRemove(id, out _);
+                    _stallAttempts.TryRemove(id, out _);
+                }
+            }, ct).ConfigureAwait(false);
         }
 
-        await LockAsync(async () =>
+        if (stillRunning.Count > 0)
         {
-            await dbClient.RemoveQueueItemsAsync(queueItemIds, ct).ConfigureAwait(false);
-            await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-            foreach (var id in queueItemIds)
-            {
-                _retryAttempts.TryRemove(id, out _);
-                _stallAttempts.TryRemove(id, out _);
-            }
-        }, ct).ConfigureAwait(false);
+            Log.Warning(
+                "Queue items {QueueItemIds} ignored cancellation and were not removed; " +
+                "their rows stay queued until the workers stop (restart the container to reclaim).",
+                string.Join(", ", stillRunning));
+        }
+
+        return stillRunning;
+    }
+
+    /// <summary>
+    /// Waits for a cancelled worker to stop until <paramref name="graceExpired"/>
+    /// fires. Returns false when the worker is still running at that point.
+    /// Caller cancellation (<paramref name="callerCt"/>) aborts the wait instead of
+    /// reading as a stuck worker.
+    /// </summary>
+    private static async Task<bool> TryAwaitWorkerAsync(
+        InProgressQueueItem item,
+        CancellationToken graceExpired,
+        CancellationToken callerCt)
+    {
+        // WhenAny does not observe ProcessingTask exceptions — the reaper does.
+        var finished = await Task.WhenAny(
+                item.ProcessingTask, Task.Delay(Timeout.InfiniteTimeSpan, graceExpired))
+            .ConfigureAwait(false);
+        callerCt.ThrowIfCancellationRequested();
+        return finished == item.ProcessingTask || item.ProcessingTask.IsCompleted;
+    }
+
+    private static async Task ObserveStoppedWorkerAsync(InProgressQueueItem item)
+    {
+        try
+        {
+            await item.ProcessingTask.ConfigureAwait(false);
+        }
+#pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
+        catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
+#pragma warning restore CA2016
+        {
+            Log.Debug(e, "Queue item {QueueItemId} exited with error after cancel", item.QueueItem.Id);
+        }
     }
 
 
@@ -452,20 +494,43 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                 .ToList();
         }, ct).ConfigureAwait(false);
 
+        // The row is already paused in the database; a worker that ignores
+        // cancellation keeps its slot until it stops, and the observer logs if
+        // it never does.
+        await CancelAndAwaitWorkersAsync(toCancel, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Cancels every worker first, then waits on one shared grace budget: per-item
+    /// waits would multiply the worst case to N × grace period. Workers that stop
+    /// in time are observed; workers that ignore cancellation past
+    /// <see cref="StuckCancelGracePeriod"/> get a watchdog and their ids are
+    /// returned so callers can quarantine or report them.
+    /// </summary>
+    private async Task<List<Guid>> CancelAndAwaitWorkersAsync(
+        List<InProgressQueueItem> toCancel,
+        CancellationToken ct)
+    {
+        foreach (var item in toCancel)
+            await item.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
+
+        List<Guid> stillRunning = [];
+        using var grace = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        grace.CancelAfter(StuckCancelGracePeriod);
         foreach (var item in toCancel)
         {
-            try
+            if (await TryAwaitWorkerAsync(item, grace.Token, ct).ConfigureAwait(false))
             {
-                await item.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
-                await item.ProcessingTask.ConfigureAwait(false);
+                await ObserveStoppedWorkerAsync(item).ConfigureAwait(false);
             }
-#pragma warning disable CA2016
-            catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
-#pragma warning restore CA2016
+            else
             {
-                Log.Debug(e, "Queue item {QueueItemId} exited with error after cancel", item.QueueItem.Id);
+                stillRunning.Add(item.QueueItem.Id);
+                _ = WatchForIgnoredCancelAsync(item);
             }
         }
+
+        return stillRunning;
     }
 
 
@@ -525,31 +590,61 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             }
         }
 
-        // Shutdown: cancel remaining workers and observe their tasks.
+        // Shutdown: cancel remaining workers and observe their tasks, bounded by
+        // the stuck-cancel grace period so a worker that ignores cancellation
+        // cannot pin the process forever.
         foreach (var item in _inProgress.Values)
             await item.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
 
         var remaining = _inProgress.Values.Select(x => x.ProcessingTask).ToArray();
         if (remaining.Length > 0)
         {
-            try { await Task.WhenAll(remaining).ConfigureAwait(false); }
-            catch (OperationCanceledException)
-            {
-                // Workers are cancelled deliberately during shutdown.
-            }
-            catch (AggregateException e) when (
-                e.Flatten().InnerExceptions.All(exception => exception.IsCancellationException()))
-            {
-                // Task.WhenAll may retain multiple expected worker cancellations.
-            }
-#pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
-            catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
+            var allWorkers = Task.WhenAll(remaining);
+            // ct is already cancelled (that is why we are here); the grace delay
+            // must not inherit it or the wait would end instantly.
+#pragma warning disable CA2016 // deliberate: ct is already cancelled on the shutdown path
+            var finished = await Task.WhenAny(allWorkers, Task.Delay(StuckCancelGracePeriod))
+                .ConfigureAwait(false);
 #pragma warning restore CA2016
+            if (finished == allWorkers || allWorkers.IsCompleted)
             {
-                Log.Debug(e, "Queue workers finished with errors during shutdown");
+                try { await allWorkers.ConfigureAwait(false); }
+                catch (OperationCanceledException)
+                {
+                    // Workers are cancelled deliberately during shutdown.
+                }
+                catch (AggregateException e) when (
+                    e.Flatten().InnerExceptions.All(exception => exception.IsCancellationException()))
+                {
+                    // Task.WhenAll may retain multiple expected worker cancellations.
+                }
+#pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
+                catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
+#pragma warning restore CA2016
+                {
+                    // The filter excludes cancellations, so only unexpected worker
+                    // faults land here; those keep their stack at Error.
+                    Log.Error(e, "Queue workers finished with errors during shutdown");
+                }
+            }
+            else
+            {
+                var hung = _inProgress.Values
+                    .Where(x => !x.ProcessingTask.IsCompleted)
+                    .ToList();
+                Log.Error(
+                    "Queue shutdown: {Count} worker(s) ignored cancellation and are still running after " +
+                    "{GraceSeconds:0}s: {QueueItemIds}. Their slots stay occupied until the tasks " +
+                    "complete; restart the container to reclaim them.",
+                    hung.Count,
+                    StuckCancelGracePeriod.TotalSeconds,
+                    string.Join(", ", hung.Select(x => x.QueueItem.Id)));
             }
         }
 
+        // Reaps only completed workers; quarantined (still-running) workers keep
+        // their resources — disposing a live worker's DB context or stream would
+        // fault it later on a thread nobody observes.
         await ReapCompletedWorkersAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -910,7 +1005,11 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             _configManager, _websocketManager, _providerUsageTracker,
             _watchdogLog, _sourceTracker, progressHook, _retryAttempts,
             _finalizeLock, cts.Token,
-            stageReporter: stage => inProgressQueueItem.CurrentStage = stage
+            stageReporter: stage =>
+            {
+                inProgressQueueItem.CurrentStage = stage;
+                inProgressQueueItem.StageStartedAtUtc = DateTime.UtcNow;
+            }
         )
         {
             // The stuck watchdog flips this flag on the final stall attempt; the
@@ -1274,8 +1373,21 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
         _configChangeSubscription.Dispose();
         _cancellationTokenSource?.Dispose();
-        _stateLock.Dispose();
-        _finalizeLock.Dispose();
+        if (_inProgress.IsEmpty)
+        {
+            _stateLock.Dispose();
+            _finalizeLock.Dispose();
+        }
+        else
+        {
+            // Quarantined workers may still enter MarkQueueItemCompleted and take
+            // these locks; disposing them now would fault live tasks.
+            Log.Warning(
+                "QueueManager disposed with {Count} quarantined worker(s) still running; " +
+                "shared locks are intentionally left undisposed.",
+                _inProgress.Count);
+        }
+
         _sleepingQueueToken.Dispose();
     }
 
@@ -1284,10 +1396,17 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         int ProgressPercentage,
         bool IsPrimary,
         TimeSpan? Eta = null,
-        double BytesPerSecond = 0);
+        double BytesPerSecond = 0,
+        string CurrentStage = "",
+        long StageAgeMs = 0,
+        long SemaphoreWaitMilliseconds = 0);
 
-    private static InProgressQueueItemSnapshot ToSnapshot(InProgressQueueItem item) =>
-        new(
+    private static InProgressQueueItemSnapshot ToSnapshot(InProgressQueueItem item)
+    {
+        var stageAgeMs = item.StageStartedAtUtc is { } started
+            ? Math.Max(0, (long)(DateTime.UtcNow - started).TotalMilliseconds)
+            : 0;
+        return new(
             item.QueueItem,
             item.ProgressPercentage,
             item.IsPrimary,
@@ -1295,7 +1414,11 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                 item.BytesPerSecond,
                 item.ProgressPercentage,
                 item.QueueItem.TotalSegmentBytes),
-            item.BytesPerSecond);
+            item.BytesPerSecond,
+            item.CurrentStage,
+            stageAgeMs,
+            item.QueueDownloadContext.SemaphoreWaitMilliseconds);
+    }
 
     private sealed class InProgressQueueItem
     {
@@ -1310,6 +1433,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         /// processors). Set by the processor; read by the stuck watchdog.
         /// </summary>
         public string CurrentStage { get; set; } = string.Empty;
+        public DateTime? StageStartedAtUtc { get; set; }
         public Task ProcessingTask { get; set; } = null!;
         public TaskCompletionSource CompletionSignal { get; init; } = null!;
         public CancellationTokenSource CancellationTokenSource { get; init; } = null!;

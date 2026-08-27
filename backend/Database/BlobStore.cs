@@ -44,8 +44,8 @@ public static class BlobStore
         CancellationToken cancellationToken = default)
         => Current.WriteBlob(id, stream, cancellationToken);
 
-    public static Task WriteBlob<T>(Guid id, T blob)
-        => Current.WriteBlob(id, blob);
+    public static Task WriteBlob<T>(Guid id, T blob, CancellationToken cancellationToken = default)
+        => Current.WriteBlob(id, blob, cancellationToken);
 
     public static Stream? ReadBlob(Guid id)
         => Current.ReadBlob(id);
@@ -53,6 +53,6 @@ public static class BlobStore
     public static Task<T?> ReadBlob<T>(Guid id)
         => Current.ReadBlob<T>(id);
 
-    public static void Delete(Guid id)
+    public static bool Delete(Guid id)
         => Current.Delete(id);
 }

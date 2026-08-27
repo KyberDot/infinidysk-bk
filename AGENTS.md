@@ -97,26 +97,26 @@ cd frontend && npm install && npm run dev
 
 Open `http://localhost:5173` (dev) or `http://localhost:3000` (production build).
 
-**Before opening a PR:**
+**Testing — run locally only what CI does not cover.** PR CI (`ci.yml`) runs
+the full gate on every PR — frontend lint/typecheck/build/tests and backend
+build/tests — so do not run those suites locally; re-running CI-covered checks
+before opening a PR wastes time. The only local runs worth doing are the ones
+CI excludes:
 
 ```bash
-# Frontend
-cd frontend && npm run typecheck && npm run build && npm test
+# SharpCompress stress tests (CI runs --filter "format!=stress"; from repository root)
+dotnet test tests/SharpCompress.Tests/SharpCompress.Tests.csproj -c Release --filter "format=stress"
 
-# Backend (from repository root)
-dotnet test tests/NzbWebDAV.Tests/NzbWebDAV.Tests.csproj -c Release
-
-# SharpCompress (from repository root; stress tests run manually)
-dotnet test tests/SharpCompress.Tests/SharpCompress.Tests.csproj -c Release --filter "format!=stress"
+# BenchmarkDotNet timing benchmarks (timing stays off CI)
+dotnet run --project backend.Benchmarks -c Release
 ```
 
 Backend tests use xUnit and live in `tests/NzbWebDAV.Tests/`. They cover streams,
 NZB/PAR2 parsing, NNTP caching and concurrency, queue logic, and SQLite-backed
 database behavior. Frontend tests use Vitest and are colocated as `*.test.ts`.
-Performance benchmarks live in `backend.Benchmarks/` and are run manually with
-`dotnet run --project backend.Benchmarks -c Release`. BenchmarkDotNet timing
-stays off CI; the deterministic streaming/SAB reports are compared in PR CI
-and against floored envelopes in `performance.yml`.
+Performance benchmarks live in `backend.Benchmarks/`; the deterministic
+streaming/SAB reports are compared in PR CI and against floored envelopes in
+`performance.yml`.
 
 ## In-tree libraries (UsenetSharp / SharpCompress / RapidYencSharp)
 
@@ -401,9 +401,9 @@ Skip this handoff if there are no local changes and nothing to push or PR. Do no
 | `docs.yml` | PRs and pushes to `main` | Zensical docs build (`zensical build --clean --strict`); deploys to GitHub Pages on `main` |
 | `codeql.yml` | PRs, pushes to `main`, and weekly schedule | CodeQL security analysis for C#, TypeScript, and GitHub Actions |
 | `refresh-dev.yml` | Manual `workflow_dispatch` | Publishes `ghcr.io/.../infinidysk:dev`, builds Linux archives, creates/updates the rolling `dev` GitHub pre-release, and moves the git `dev` tag to that commit (unversioned snapshot); Discord announcement is LLM-summarized with raw-list fallback (`OPENAI_API_KEY` optional) |
-| `cut-prerelease.yml` | Manual `workflow_dispatch` | Creates numbered and rolling `rc` GitHub Pre-releases with Linux archives; pushes versioned RC tags to every registry and rolling `:rc`/`:dev` tags to canonical GHCR and Docker Hub; refreshes the rolling `dev` pre-release with the RC's archives; moves git `rc` and `dev` tags (`dev` first, so `rc` is never ahead of `dev`); Discord announcement is LLM-summarized with raw-list fallback (`OPENAI_API_KEY` optional) |
-| `release.yml` | Push to `main` | release-please versioning; publishes Linux archives and stable Docker tags to every registry, plus `dev` and `rc` tags to canonical GHCR and Docker Hub; refreshes the rolling `dev` pre-release; moves git `dev` and `rc` tags (`dev` first); deletes versioned `v*-rc.*` pre-releases and their image tags; Discord announcement is LLM-summarized from `CHANGELOG.md` with raw-list fallback (`OPENAI_API_KEY` optional) |
-| `release.yml` | Manual `workflow_dispatch` | Republishes Linux archives and stable Docker tags to every registry, plus `dev` and `rc` tags to canonical GHCR and Docker Hub, for an existing version; refreshes the rolling `dev` pre-release; moves git `dev` and `rc` tags (`dev` first); deletes versioned `v*-rc.*` pre-releases and their image tags |
+| `cut-prerelease.yml` | Manual `workflow_dispatch` | Creates numbered and rolling `rc` GitHub Pre-releases with Linux archives; pushes versioned RC tags to canonical and legacy GHCR and the rolling `:rc` tag to canonical GHCR (pre-release images are not published to Docker Hub); refreshes the rolling `dev` image on canonical GHCR and Docker Hub and the rolling `dev` pre-release with the RC's archives; moves git `rc` and `dev` tags (`dev` first, so `rc` is never ahead of `dev`); Discord announcement is LLM-summarized with raw-list fallback (`OPENAI_API_KEY` optional) |
+| `release.yml` | Push to `main` | release-please versioning; publishes Linux archives and stable Docker tags to every registry, plus `dev` and `rc` tags to canonical GHCR and `dev` to Docker Hub; refreshes the rolling `dev` pre-release; moves git `dev` and `rc` tags (`dev` first); deletes versioned `v*-rc.*` pre-releases and their image tags; Discord announcement is LLM-summarized from `CHANGELOG.md` with raw-list fallback (`OPENAI_API_KEY` optional) |
+| `release.yml` | Manual `workflow_dispatch` | Republishes Linux archives and stable Docker tags to every registry, plus `dev` and `rc` tags to canonical GHCR and `dev` to Docker Hub, for an existing version; refreshes the rolling `dev` pre-release; moves git `dev` and `rc` tags (`dev` first); deletes versioned `v*-rc.*` pre-releases and their image tags |
 | `promote-lts.yml` | Manual `workflow_dispatch` | Moves git `lts` and GHCR `:lts` to an existing published version (no rebuild) |
 | `performance.yml` | Nightly cron (`17 5 * * *`) + `workflow_dispatch` | Streaming and SAB API report compare (deterministic + floored timing envelopes); optional re-baseline PR |
 | `dependency-submission.yml` | GitHub Release `published` (plus manual `workflow_dispatch`) | Dependency graph submission (NuGet + npm) |
@@ -418,8 +418,8 @@ Docker image builds are shared via the reusable workflow. Branch and dependabot 
 - Merging to `main` triggers **release-please** (`.github/workflows/release.yml`) which maintains `CHANGELOG.md` + `version.txt` and creates GitHub releases.
 - Standard SemVer: breaking commits (`feat!` / `fix!` / `BREAKING CHANGE` footer) → major version bump (and Breaking Changes changelog section). Reserve these for genuine breaks — user-visible breaking changes and irreversible/destructive database migrations — so major versions stay meaningful; routine additive migrations are plain `feat(db)` / `fix(db)`.
 - `feat` → minor bump; `fix` → patch bump (standard SemVer in `.release-please-config.json`). Other conventional types that still appear in notes (`perf`, `refactor`, `ux`, `revert`, `build`, and legacy `docs` / `tests`) do not bump the version by themselves. **`chore` commits are omitted from release notes** — use `chore(<scope>)` for CI, tests, docs, agents/skills, and other non-behavior work (do not use bare `docs` / `ci` / `test` / `tests` types).
-- When release-please creates a release on merge to `main`, the same workflow run attaches prebuilt linux-x64/arm64 archives, publishes stable tags (`latest`, exact `vMAJOR.MINOR.PATCH`, and rolling `vMAJOR` / `vMAJOR.MINOR`) to every registry, and updates `dev` and `rc` on canonical `ghcr.io/infinidysk/infinidysk` and Docker Hub; it also moves the git `dev` and `rc` tags to that release commit.
-- After a stable publish (release-please or manual republish), the workflow deletes all versioned `vX.Y.Z-rc.N` GitHub Pre-releases (and their git tags) plus matching image tags on GHCR (`infinidysk` and legacy `nzbdav`) and Docker Hub. The rolling `rc` GitHub release and tag are kept.
+- When release-please creates a release on merge to `main`, the same workflow run attaches prebuilt linux-x64/arm64 archives, publishes stable tags (`latest`, exact `vMAJOR.MINOR.PATCH`, and rolling `vMAJOR` / `vMAJOR.MINOR`) to every registry, and updates `dev` and `rc` on canonical `ghcr.io/infinidysk/infinidysk` and `dev` on Docker Hub; it also moves the git `dev` and `rc` tags to that release commit.
+- After a stable publish (release-please or manual republish), the workflow deletes all versioned `vX.Y.Z-rc.N` GitHub Pre-releases (and their git tags) plus matching image tags on GHCR (`infinidysk` and legacy `nzbdav`). Pre-release images are not published to Docker Hub, so no Docker Hub cleanup is needed. The rolling `rc` GitHub release and tag are kept.
 - To republish images and archives for an existing release (e.g. after fixing CI), run **Release** workflow manually with the `version` input (e.g. `0.6.5`); this also moves the git `dev` and `rc` tags to that version.
 - Between releases, refresh the unversioned Docker image (`:dev`), rolling `dev` GitHub pre-release (with Linux archives), and git `dev` tag on demand via **Actions → Refresh :dev → Run workflow**. The rolling `dev` release carries stable-named archives (`infinidysk-dev-*`) that are overwritten on each refresh; there are no versioned dev releases or tags.
 - Cut a versioned release candidate via **Actions → Cut pre-release → Run workflow**. The stable version defaults to the open release-please PR; pass `version` only to override it. This creates a `vX.Y.Z-rc.N` GitHub Pre-release with versioned images and archives, updates the rolling `rc` Pre-release with stable-named archives, pushes the rolling `:rc` and `:dev` images, moves the git `rc` and `dev` tags, and announces the release candidate to the announcements Discord channel. Release notes come from GitHub `--generate-notes` (vs the previous GitHub Release, which may be another rc). Versioned RC artifacts are removed on the next stable release.
@@ -473,7 +473,7 @@ else
 - **Submodule / natives:** after clone run `git submodule update --init libs/rapidyenc`. Prefer `scripts/run-backend.sh` so the host rapidyenc native is built and `RAPIDYENC_LIBRARY_PATH` is set (required for yEnc on macOS and for local Linux without Docker).
 - **Breaking upgrades:** irreversible schema changes ship as ordinary EF migrations that auto-apply on startup and surface through the migration-progress splash; there is no `UPGRADE` env-var interlock. Advise a `/config` backup before upgrading across such a migration. Only **irreversible/destructive** migrations use a breaking conventional-commit marker (`!` or `BREAKING CHANGE`); routine additive migrations ship as plain `feat(db)` / `fix(db)` with a backup note in the PR description and release announcement.
 - **Test fixtures:** prefer deterministic generated data and `FakeNntpClient`; do not require live Usenet providers in the automated suite.
-- **Streaming changes:** run the focused backend tests and retain manual range, rclone scrubbing, and encrypted-archive playback checks for behavior not covered by automation.
+- **Streaming changes:** retain manual range, rclone scrubbing, and encrypted-archive playback checks for behavior not covered by automation; PR CI runs the automated backend tests.
 - **Stack dumps for known failures:** do not dismiss an attached exception trace as “expected” without a remediation that catches it and logs a human-friendly event (see [Stack dumps and human-friendly log events](#stack-dumps-and-human-friendly-log-events)).
 
 ## Docs version pills

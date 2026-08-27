@@ -9,7 +9,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { useRevalidator, useSearchParams } from "react-router";
 import { useWebsocketTopics } from "~/utils/shared-websocket";
-import { Alert, Button, Icon } from "~/components/ui";
+import { Alert, Button, Icon, PageHeader } from "~/components/ui";
 import { useIsReadOnly } from "~/auth/authorization";
 import type {
   HealthCheckQueueResponse,
@@ -298,19 +298,29 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="flex min-h-full min-w-full flex-col gap-8 px-4 py-4 text-sm text-base-content md:px-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <HealthStats stats={historyStats} />
-        {isEnabled && !isReadOnly && (
-          <Button
-            variant="outline"
-            size="small"
-            onClick={() => void onRunAllChecks()}
-            disabled={triggerState === "pending"}
-          >
-            {triggerState === "pending" ? "Starting…" : "Run all checks now"}
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="Health"
+        subtitle="Repair queue and history for files that fail Usenet article checks."
+        actions={
+          <>
+            <a className="btn btn-sm" href="#repair-history">
+              <Icon name="history" className="!text-[16px]" />
+              Jump to history
+            </a>
+            {isEnabled && !isReadOnly && (
+              <Button
+                variant="outline"
+                size="small"
+                onClick={() => void onRunAllChecks()}
+                disabled={triggerState === "pending"}
+              >
+                {triggerState === "pending" ? "Starting…" : "Run all checks now"}
+              </Button>
+            )}
+          </>
+        }
+      />
+      <HealthStats stats={historyStats} />
       {triggerError && (
         <Alert className="alert-soft" variant="danger">
           <Icon name="error" className="shrink-0 !text-[20px]" />
@@ -355,6 +365,10 @@ export default function Health({ loaderData }: Route.ComponentProps) {
           </div>
         </Alert>
       )}
+      <HealthTable
+        isEnabled={isEnabled}
+        healthCheckItems={queueItems.filter((_, index) => index < 10)}
+      />
       <HealthHistoryTable
         items={historyItems}
         totalCount={historyTotalCount}
@@ -367,10 +381,6 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         onPageSelected={(page) => setHistoryParams({ page })}
         onPageSizeSelected={onHistoryPageSizeSelected}
         onRefresh={() => void revalidator.revalidate()}
-      />
-      <HealthTable
-        isEnabled={isEnabled}
-        healthCheckItems={queueItems.filter((_, index) => index < 10)}
       />
     </div>
   );
