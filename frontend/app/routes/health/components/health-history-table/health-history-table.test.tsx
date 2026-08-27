@@ -121,6 +121,6 @@ describe("HealthHistoryTable", () => {
     expect(markup).toContain("Action needed");
     expect(markup).toContain("badge-warning");
     expect(markup).toContain("Streaming payload missing.");
-    expect(markup).not.toContain(">Repaired<");
+    expect(markup).not.toContain("badge-info");
   });
 });
