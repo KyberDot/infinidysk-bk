@@ -6495,9 +6495,48 @@
     "/api/remove-missing-payloads": {
       "post": {
         "operationId": "post-api-remove-missing-payloads",
+        "parameters": [
+          {
+            "description": "Approval token returned by the matching dry run within its 15-minute lifetime.",
+            "in": "header",
+            "name": "X-InfiniDysk-Cleanup-Preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "OK"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "message": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "status": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
           },
           "400": {
             "content": {
@@ -6571,7 +6610,32 @@
         "operationId": "get-api-remove-missing-payloads-audit",
         "responses": {
           "200": {
-            "description": "OK"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "report": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "report",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
           },
           "400": {
             "content": {
@@ -6645,7 +6709,42 @@
         "operationId": "post-api-remove-missing-payloads-dry-run",
         "responses": {
           "200": {
-            "description": "OK"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "message": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "previewToken": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "status": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "previewToken",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
           },
           "400": {
             "content": {

@@ -24,9 +24,23 @@ public sealed class RemoveMissingPayloadsController(
             previewToken: Request.Headers["X-InfiniDysk-Cleanup-Preview"].FirstOrDefault());
         var executed = await task.Execute().ConfigureAwait(false);
         if (!executed)
-            return Conflict(new { error = "Another maintenance task is already running." });
+            return Conflict(new RemoveMissingPayloadsTaskResponse
+            {
+                Status = false,
+                Message = null,
+                Error = "Another maintenance task is already running.",
+            });
         return task.Succeeded
-            ? Ok(new { status = true, message = task.TerminalMessage })
-            : BadRequest(new { status = false, error = task.TerminalMessage });
+            ? Ok(new RemoveMissingPayloadsTaskResponse
+            {
+                Status = true,
+                Message = task.TerminalMessage,
+            })
+            : BadRequest(new RemoveMissingPayloadsTaskResponse
+            {
+                Status = false,
+                Message = null,
+                Error = task.TerminalMessage,
+            });
     }
 }

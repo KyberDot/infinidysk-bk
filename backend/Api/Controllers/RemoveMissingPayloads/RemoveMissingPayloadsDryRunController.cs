@@ -23,14 +23,24 @@ public sealed class RemoveMissingPayloadsDryRunController(
             isDryRun: true);
         var executed = await task.Execute().ConfigureAwait(false);
         if (!executed)
-            return Conflict(new { error = "Another maintenance task is already running." });
-        return task.Succeeded
-            ? Ok(new
+            return Conflict(new RemoveMissingPayloadsTaskResponse
             {
-                status = true,
-                message = task.TerminalMessage,
-                previewToken = task.IssuedPreviewToken,
+                Status = false,
+                Message = null,
+                Error = "Another maintenance task is already running.",
+            });
+        return task.Succeeded
+            ? Ok(new RemoveMissingPayloadsTaskResponse
+            {
+                Status = true,
+                Message = task.TerminalMessage,
+                PreviewToken = task.IssuedPreviewToken,
             })
-            : BadRequest(new { status = false, error = task.TerminalMessage });
+            : BadRequest(new RemoveMissingPayloadsTaskResponse
+            {
+                Status = false,
+                Message = null,
+                Error = task.TerminalMessage,
+            });
     }
 }

@@ -112,8 +112,8 @@ public sealed class FileBlobStore : IBlobStore, IDisposable
     {
         try
         {
-            _ = File.GetAttributes(GetBlobPath(id));
-            return true;
+            var attributes = File.GetAttributes(GetBlobPath(id));
+            return !attributes.HasFlag(FileAttributes.Directory);
         }
         catch (FileNotFoundException)
         {

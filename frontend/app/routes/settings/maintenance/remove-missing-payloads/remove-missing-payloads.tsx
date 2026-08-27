@@ -18,6 +18,7 @@ export function RemoveMissingPayloads({ savedConfig }: RemoveMissingPayloadsProp
   const [statusError, setStatusError] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [previewToken, setPreviewToken] = useState<string | null>(null);
+  const [terminalMessage, setTerminalMessage] = useState<string | null>(null);
 
   const libraryDir = savedConfig["media.library-dir"];
   const progressMessage = progress?.replace("Dry Run - ", "");
@@ -25,10 +26,11 @@ export function RemoveMissingPayloads({ savedConfig }: RemoveMissingPayloadsProp
     progressMessage?.startsWith("Done") ||
     progressMessage?.startsWith("Failed") ||
     progressMessage?.startsWith("Aborted");
-  const isRunning = !isFinished && (isFetching || runStarted);
+  const isRunning = isFetching || (!isFinished && runStarted);
   const canScan = !!libraryDir && connected && !isRunning;
   const canRun = canScan && previewToken !== null;
-  const isDone = progressMessage?.startsWith("Done");
+  const displayedMessage = statusError ?? progress ?? terminalMessage;
+  const displayedIsDone = displayedMessage?.replace("Dry Run - ", "").startsWith("Done") === true;
 
   useWebsocketTopic("mpcp", "state", setProgress, {
     onOpen: () => setConnected(true),
@@ -39,14 +41,18 @@ export function RemoveMissingPayloads({ savedConfig }: RemoveMissingPayloadsProp
   });
 
   useEffect(() => {
-    if (isFinished) setRunStarted(false);
-  }, [isFinished]);
+    if (isFinished) {
+      setRunStarted(false);
+      setTerminalMessage(progress);
+    }
+  }, [isFinished, progress]);
 
   const startTask = useCallback(
     async (path: string, dryRun: boolean) => {
       setShowConfirm(false);
       setStatusError(null);
       setProgress(null);
+      setTerminalMessage(null);
       setRunStarted(true);
       setIsFetching(true);
       if (dryRun) setPreviewToken(null);
@@ -57,26 +63,30 @@ export function RemoveMissingPayloads({ savedConfig }: RemoveMissingPayloadsProp
             ? { headers: { "X-InfiniDysk-Cleanup-Preview": previewToken } }
             : {}),
         });
-        const body = (await response.json().catch(() => ({}))) as {
+        const body = (await response.json().catch(() => null)) as {
           error?: string;
           message?: string;
           previewToken?: string;
-        };
+        } | null;
+        const error = body?.error;
+        const message = body?.message;
+        const token = body?.previewToken;
         if (!response.ok) {
-          throw new Error(body.error || `Request failed (${response.status})`);
+          throw new Error(error || `Request failed (${response.status})`);
         }
-        if (dryRun && !body.previewToken) {
+        if (dryRun && !token) {
           throw new Error("Dry run completed without a cleanup approval. Run it again.");
         }
 
-        setProgress(`${dryRun ? "Dry Run - " : ""}${body.message ?? "Done."}`);
-        setPreviewToken(dryRun ? (body.previewToken ?? null) : null);
+        const terminal = `${dryRun ? "Dry Run - " : ""}${message ?? "Done."}`;
+        setProgress(terminal);
+        setTerminalMessage(terminal);
+        setPreviewToken(dryRun ? (token ?? null) : null);
       } catch (error) {
         setPreviewToken(null);
         setStatusError(
           error instanceof Error ? error.message : "Missing-payload cleanup request failed.",
         );
-        setRunStarted(false);
       } finally {
         setIsFetching(false);
         setRunStarted(false);
@@ -147,13 +157,16 @@ export function RemoveMissingPayloads({ savedConfig }: RemoveMissingPayloadsProp
             <div
               aria-live="polite"
               className={`min-w-0 whitespace-pre-line break-words font-mono text-xs ${
-                statusError ? "text-error" : isDone ? "text-success" : "text-base-content/70"
+                statusError
+                  ? "text-error"
+                  : displayedIsDone
+                    ? "text-success"
+                    : "text-base-content/70"
               }`}
             >
-              {statusError ??
-                progress ??
+              {displayedMessage ??
                 (previewToken ? "Dry run reviewed. Cleanup is ready." : "Run a dry run first.")}
-              {isDone && (
+              {displayedIsDone && (
                 <>
                   {" "}
                   <a

@@ -8,5 +8,9 @@ namespace NzbWebDAV.Api.Controllers.RemoveMissingPayloads;
 public sealed class RemoveMissingPayloadsAuditController : GetOnlyApiController
 {
     protected override Task<IActionResult> HandleRequest() =>
-        Task.FromResult<IActionResult>(Ok(RemoveMissingPayloadsTask.GetAuditReport()));
+        Task.FromResult<IActionResult>(Ok(new RemoveMissingPayloadsAuditResponse
+        {
+            Status = true,
+            Report = RemoveMissingPayloadsTask.GetAuditReport(),
+        }));
 }
