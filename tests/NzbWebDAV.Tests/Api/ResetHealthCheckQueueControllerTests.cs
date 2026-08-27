@@ -7,6 +7,7 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.MigrationHelpers;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Tests.Api;
 
@@ -38,7 +39,7 @@ public sealed class ResetHealthCheckQueueControllerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ResetAsync_NullsScheduledUsenetFiles_WhilePreservingUrgentAndDirectories()
+    public async Task ResetAsync_MarksNonUrgentUsenetFilesForcedRecheck_WhilePreservingUrgentAndDirectories()
     {
         var scheduled = NewItem("scheduled.mkv", DavItem.ItemType.UsenetFile, DateTimeOffset.UtcNow.AddDays(1));
         var uncheckedFile = NewItem("unchecked.mkv", DavItem.ItemType.UsenetFile, null);
@@ -50,12 +51,13 @@ public sealed class ResetHealthCheckQueueControllerTests : IAsyncLifetime
 
         var response = await InvokeAsync();
 
-        Assert.Equal(1, response.ResetCount);
+        Assert.Equal(2, response.ResetCount);
         var updated = await _context.Items.ToDictionaryAsync(x => x.Id);
-        Assert.Null(updated[scheduled.Id].NextHealthCheck);
-        Assert.Null(updated[uncheckedFile.Id].NextHealthCheck);
+        Assert.Equal(HealthCheckService.ForcedRecheckSentinel, updated[scheduled.Id].NextHealthCheck);
+        Assert.Equal(HealthCheckService.ForcedRecheckSentinel, updated[uncheckedFile.Id].NextHealthCheck);
         Assert.Equal(DateTimeOffset.UnixEpoch, updated[urgent.Id].NextHealthCheck);
         Assert.NotNull(updated[directory.Id].NextHealthCheck);
+        Assert.NotEqual(HealthCheckService.ForcedRecheckSentinel, updated[directory.Id].NextHealthCheck);
     }
 
     [Fact]
