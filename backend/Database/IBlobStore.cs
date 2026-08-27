@@ -11,8 +11,8 @@ public interface IBlobStore
 {
     [OverloadResolutionPriority(1)]
     Task WriteBlob(Guid id, Stream stream, CancellationToken cancellationToken = default);
-    Task WriteBlob<T>(Guid id, T blob);
+    Task WriteBlob<T>(Guid id, T blob, CancellationToken cancellationToken = default);
     Stream? ReadBlob(Guid id);
     Task<T?> ReadBlob<T>(Guid id);
-    void Delete(Guid id);
+    bool Delete(Guid id);
 }

@@ -72,7 +72,12 @@ public class QueueItemProcessor(
     }
 
     private const int MaxProviderRetryAttempts = 20;
-    private static readonly TimeSpan StageWarningInterval = TimeSpan.FromMinutes(15);
+    private const int MaxFinalizeCommitRetries = 3;
+    private static readonly TimeSpan TransientDatabaseBackoff = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DiskOrCorruptionBackoff = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan StageWarningInterval = TimeSpan.FromMinutes(2);
+
+    internal static readonly TimeSpan RejectedReleaseRecheckWindow = TimeSpan.FromDays(14);
 
     /// <summary>
     /// Set by the queue's stuck watchdog when this worker's cancellation should
@@ -87,6 +92,42 @@ public class QueueItemProcessor(
     /// called for a plain cancellation that leaves the item queued for retry.
     /// </summary>
     internal Action? OnTerminal { get; set; }
+
+    internal static async Task ThrowIfRecentlyRejectedAsync(
+        DavDatabaseClient dbClient,
+        QueueItem queueItem,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var cutoff = now - RejectedReleaseRecheckWindow;
+        var rejection = await dbClient.Ctx.HealthCheckResults
+            .AsNoTracking()
+            .Where(result => result.RepairStatus == HealthCheckResult.RepairAction.Repaired)
+            .Where(result => result.CreatedAt >= cutoff)
+            .Where(result =>
+                (result.NzbFileName != null
+                    && result.NzbFileName == queueItem.FileName)
+                || (result.NzbFileName == null
+                    && result.JobName != null
+                    && result.JobName == queueItem.JobName))
+            .OrderByDescending(result => result.CreatedAt)
+            .Select(result => new
+            {
+                result.CreatedAt,
+                result.NzbFileName,
+                result.JobName,
+            })
+            .FirstOrDefaultAsync(ct)
+            .ConfigureAwait(false);
+
+        if (rejection is null)
+            return;
+
+        throw new NonRetryableDownloadException(
+            $"This release failed health validation on {rejection.CreatedAt:yyyy-MM-dd HH:mm} UTC " +
+            "and its original download was removed and blocklisted. Refusing to process the " +
+            $"same release again for {RejectedReleaseRecheckWindow.TotalDays:0} days.");
+    }
 
     internal static List<string> SelectArticlesForExistenceCheck(
         IEnumerable<IReadOnlyList<string>> segmentsByFile,
@@ -206,8 +247,10 @@ public class QueueItemProcessor(
                 queueItem.PauseUntil = DateTime.Now + backoff;
                 dbClient.Ctx.QueueItems.Attach(queueItem);
                 dbClient.Ctx.Entry(queueItem).Property(x => x.PauseUntil).IsModified = true;
-                await WithFinalizeLockAsync(() => dbClient.Ctx.SaveChangesAsync(ct))
-                    .ConfigureAwait(false);
+                // Retry persistence is a single-row PauseUntil write. It must not join
+                // the finalize convoy — a worker blocked in readiness/blob I/O would
+                // otherwise pin every provider-retry for the process.
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Queued");
             }
             catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
@@ -221,6 +264,27 @@ public class QueueItemProcessor(
         // it to the history as a failed job.
         catch (Exception e) when (e is not OutOfMemoryException)
         {
+            // A persistence-layer failure is not a content failure. Keep the item
+            // queued with a backoff instead of writing a misleading failed-history
+            // row for healthy content; the next claim retries the finalize.
+            if (e.IsTransientDatabaseException())
+            {
+                e.LogWarningKnownOrStack(
+                    "Queue finalize deferred for {JobName}; the import stays queued and is not failed",
+                    queueItem.JobName);
+                await PauseQueueItemAfterDatabaseErrorAsync(TransientDatabaseBackoff).ConfigureAwait(false);
+                return;
+            }
+
+            if (e.IsKnownSqliteDiskException() || e.IsDatabaseCorruptionException())
+            {
+                e.LogWarningKnownOrStack(
+                    "Queue finalize blocked for {JobName}; the import stays queued and is not failed",
+                    queueItem.JobName);
+                await PauseQueueItemAfterDatabaseErrorAsync(DiskOrCorruptionBackoff).ConfigureAwait(false);
+                return;
+            }
+
             // Remember definitively missing articles so retries of this item and re-grabs
             // of the same release fail in milliseconds at the step-0 precheck instead of
             // re-verifying every article across all providers (issue #732).
@@ -241,7 +305,39 @@ public class QueueItemProcessor(
                     "Failed to mark queue item {JobName} as failed after processing error: {ProcessingError}",
                     queueItem.JobName,
                     e.Message);
+                if (ex.IsTransientDatabaseException())
+                {
+                    // Without a backoff the row is immediately reclaimable and the
+                    // failing finalize hot-loops; leave it queued with a pause instead.
+                    await PauseQueueItemAfterDatabaseErrorAsync(TransientDatabaseBackoff)
+                        .ConfigureAwait(false);
+                }
             }
+        }
+    }
+
+    /// <summary>
+    /// Leaves the item queued with a PauseUntil backoff after a database
+    /// infrastructure failure. The backoff write is itself best-effort: if the
+    /// database is still contended, the row is simply reclaimable one cycle early.
+    /// </summary>
+    private async Task PauseQueueItemAfterDatabaseErrorAsync(TimeSpan backoff)
+    {
+        try
+        {
+            dbClient.Ctx.ClearChangeTracker();
+            queueItem.PauseUntil = DateTime.Now + backoff;
+            dbClient.Ctx.QueueItems.Attach(queueItem);
+            dbClient.Ctx.Entry(queueItem).Property(x => x.PauseUntil).IsModified = true;
+            await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+            _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Queued");
+        }
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+        {
+            Log.Warning(
+                "Could not persist the database-error backoff for {JobName}: {Reason}",
+                queueItem.JobName,
+                ex.GetBaseException().Message);
         }
     }
 
@@ -336,6 +432,8 @@ public class QueueItemProcessor(
         // https://github.com/infinidysk/infinidysk/issues/101
         var articlesToPrecheck = nzbFiles.SelectMany(x => x.Segments).Select(x => x.MessageId);
         HealthCheckService.CheckCachedMissingSegmentIds(articlesToPrecheck);
+        await ThrowIfRecentlyRejectedAsync(dbClient, queueItem, DateTimeOffset.UtcNow, ct)
+            .ConfigureAwait(false);
 
         await RunStageAsync("sibling-donors",
             () => SiblingDonorAttacher.AttachToNewImportAsync(
@@ -397,10 +495,10 @@ public class QueueItemProcessor(
         }
 
         // step 2a -- try altmount-style lazy RAR mounting for the rar group
-        // when enabled. On success, the entire rar group is handled here
-        // (only the first volume gets parsed) and skipped in step 2b. On
-        // ineligibility — multi-file, compressed, solid, or first-volume
-        // parse failure — fall through to the per-part eager pipeline.
+        // when enabled. On success, the first volume is parsed and cached
+        // continuation-header prefixes are validated before the rar group is
+        // skipped in step 2b. On ineligibility — multi-file, compressed,
+        // solid, or header-parse failure — fall through to the eager pipeline.
         LazyRarProcessor.Result? lazyRarResult = null;
         var rarFiles = fileInfos.Where(x => GetGroupName(x) == "rar").ToList();
         if (configManager.IsLazyRarParsingEnabled() && rarFiles.Count > 0)
@@ -494,6 +592,20 @@ public class QueueItemProcessor(
             queueItem.Id, nzbFiles.Count, msFirstSeg, msPar2, msRar, msProcessors, msHealth,
             ct.GetContext<QueueDownloadContext>()?.SemaphoreWaitMilliseconds ?? 0);
 
+        // BODY-level readiness runs before finalization so a slow or damaged probe can
+        // never hold the process-wide finalize lock. Targets are the same direct media
+        // files that output filtering will mount.
+        if (configManager.GetMediaReadinessCategories().Contains(queueItem.Category.ToLowerInvariant()))
+        {
+            await RunStageAsync(
+                "import-readiness",
+                () => new FinalMediaReadinessValidator(usenetClient, configManager)
+                    .ValidateAsync(
+                        FinalMediaReadinessValidator.PlanTargets(
+                            fileProcessingResults, queueItem.Category, queueItem.JobName, configManager),
+                        ct)).ConfigureAwait(false);
+        }
+
         // update the database
         await MarkQueueItemCompleted(startTime, error: null, async () =>
         {
@@ -513,19 +625,9 @@ public class QueueItemProcessor(
             if (configManager.IsEnsureImportableMediaEnabled())
                 new EnsureImportableMediaValidator(dbClient).ThrowIfValidationFails();
 
-            if (healthCheckCategories.Contains(queueItem.Category.ToLowerInvariant()))
-            {
-                await RunStageAsync(
-                    "import-readiness",
-                    () => new FinalMediaReadinessValidator(dbClient, usenetClient, configManager)
-                        .ValidateAsync(ct)).ConfigureAwait(false);
-            }
-
-            // create strm files, if necessary
-            if (configManager.GetImportStrategy() == "strm")
-                await new CreateStrmFilesPostProcessor(configManager, dbClient, queueItem.Id)
-                    .CreateStrmFilesAsync()
-                    .ConfigureAwait(false);
+            // STRM sidecars are published after the commit below (see
+            // MarkQueueItemCompleted), never inside these staged operations:
+            // a failed SaveChanges must not leave sidecars for an uncommitted import.
 
             await SiblingDonorAttacher.BackfillCompletedSiblingsAsync(
                 dbClient, queueItem, nzb, configManager, ct).ConfigureAwait(false);
@@ -836,7 +938,8 @@ public class QueueItemProcessor(
             dbClient.Ctx.SuppressAutomaticRcloneVfsForget = true;
             try
             {
-                await dbClient.Ctx.SaveChangesAsync(finalizeCt).ConfigureAwait(false);
+                _stageReporter("finalize-commit");
+                await SaveFinalizeWithTransientRetryAsync(finalizeCt).ConfigureAwait(false);
             }
             finally
             {
@@ -846,6 +949,34 @@ public class QueueItemProcessor(
 
         try
         {
+            // STRM sidecars publish only after the mount tree and history row have
+            // committed, and outside the finalize lock: sidecar filesystem I/O needs
+            // no global serialization, and a hung write (e.g. a stalled network mount)
+            // must not block other imports whose history is already committed. The
+            // files land before the Arr refresh below, preserving scan order.
+            if (error is null && configManager.GetImportStrategy() == "strm")
+            {
+                var strmPostProcessor = new CreateStrmFilesPostProcessor(configManager, dbClient, queueItem.Id);
+                try
+                {
+                    await strmPostProcessor.CreateStrmFilesAsync(finalizeCt).ConfigureAwait(false);
+                    if (dbClient.Ctx.ChangeTracker.HasChanges())
+                        await SaveStrmMetadataWithTransientRetryAsync(finalizeCt).ConfigureAwait(false);
+                }
+                catch (Exception strmError) when (strmError is not OutOfMemoryException)
+                {
+                    // The import is already committed; a sidecar failure must not
+                    // re-finalize it as failed. Sidecars whose ownership metadata
+                    // could not be persisted are rolled back so they do not outlive
+                    // the metadata later cleanup relies on. Operators can run
+                    // Recreate STRM Files.
+                    strmPostProcessor.RollbackPublishedWrites();
+                    strmError.LogWarningKnownOrStack(
+                        "STRM publish failed for {JobName} after the import committed",
+                        queueItem.JobName);
+                }
+            }
+
             _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());
             _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemAdded, historyJson!);
             _ = DavDatabaseContext.RcloneVfsForget(["/nzbs"], ct);
@@ -880,6 +1011,70 @@ public class QueueItemProcessor(
         }
     }
 
+    /// <summary>
+    /// Retries the finalize commit in place on SQLITE_BUSY/LOCKED contention only.
+    /// The ChangeTracker is left intact so each attempt re-runs the same commit;
+    /// blob writes are idempotent (same ids, temp-file + move). Disk-full,
+    /// read-only, and corruption errors are never retried here.
+    /// </summary>
+    private async Task SaveFinalizeWithTransientRetryAsync(CancellationToken finalizeCt)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await dbClient.Ctx.SaveChangesAsync(finalizeCt).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < MaxFinalizeCommitRetries
+                && ex.IsTransientDatabaseException()
+                && !finalizeCt.IsCancellationRequested)
+            {
+                Log.Warning(
+                    "Queue finalize commit deferred for {JobName} (attempt {Attempt}/{MaxAttempts}). Reason: {Reason}",
+                    queueItem.JobName,
+                    attempt + 1,
+                    MaxFinalizeCommitRetries + 1,
+                    ex.GetBaseException().Message);
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * (attempt + 1)), finalizeCt)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Retries the post-commit STRM ownership-metadata save on SQLITE_BUSY/LOCKED
+    /// contention only, mirroring the finalize commit retry. The ChangeTracker is
+    /// left intact so each attempt re-runs the same save; cancellation and
+    /// non-transient failures propagate to the caller's rollback path.
+    /// </summary>
+    private async Task SaveStrmMetadataWithTransientRetryAsync(CancellationToken finalizeCt)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await dbClient.Ctx.SaveChangesAsync(finalizeCt).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < MaxFinalizeCommitRetries
+                && ex.IsTransientDatabaseException()
+                && !finalizeCt.IsCancellationRequested)
+            {
+                Log.Warning(
+                    "STRM metadata save deferred for {JobName} (attempt {Attempt}/{MaxAttempts}). Reason: {Reason}",
+                    queueItem.JobName,
+                    attempt + 1,
+                    MaxFinalizeCommitRetries + 1,
+                    ex.GetBaseException().Message);
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * (attempt + 1)), finalizeCt)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task WithFinalizeLockAsync(Func<Task> action, CancellationToken? cancellationToken = null)
     {
         if (finalizeLock is null)
@@ -889,6 +1084,7 @@ public class QueueItemProcessor(
         }
 
         var waitCt = cancellationToken ?? ct;
+        _stageReporter("finalize-lock-wait");
         await finalizeLock.WaitAsync(waitCt).ConfigureAwait(false);
         try
         {

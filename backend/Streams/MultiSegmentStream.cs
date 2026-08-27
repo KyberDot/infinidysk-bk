@@ -381,6 +381,10 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
             if (ShouldStopPrefetch(segmentsEnqueued, enqueuedBytes))
                 break;
 
+            // Fail-fast must win before the batch goes on the wire: once BODY commands
+            // are issued, every response needs an owner that drains or disposes it.
+            ThrowIfPlaybackFailFast();
+
             await WaitForPrefetchCeilingAsync(cancellationToken).ConfigureAwait(false);
 
             // Adaptive width: narrower batches → more outstanding connections at the
@@ -535,8 +539,27 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         var batch = await _usenetClient.DecodedBodiesAsync(
             liveIds, onConnectionReadyAgain: null, cancellationToken).ConfigureAwait(false);
         if (batch.Responses.Count != liveIds.Length)
+        {
+            // The client broke the batch contract after the commands went on the wire.
+            // Drain whatever arrived so the shared batch connection can complete.
+            foreach (var responseTask in batch.Responses)
+            {
+                try
+                {
+                    var response = await responseTask.ConfigureAwait(false);
+                    if (response.Stream is not null)
+                        await response.Stream.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception e) when (e is not OutOfMemoryException)
+                {
+                    Log.Debug(e, "Failed to drain BODY response after batch size mismatch for {FileName}.", _fileName);
+                }
+            }
+
             throw new InvalidOperationException(
                 $"Pipelined BODY returned {batch.Responses.Count} responses for {liveIds.Length} requests.");
+        }
+
         return batch.Responses.ToArray();
     }
 
@@ -596,6 +619,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 return result;
             }
 
+            var persistent = new PersistentCorruptionTracker();
             for (var attempt = 0; ; attempt++)
             {
                 try
@@ -645,6 +669,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 }
                 catch (UsenetCorruptArticleException e) when (!cancellationToken.IsCancellationRequested)
                 {
+                    persistent.NoteOrThrow(e);
                     if (attempt >= GetCorruptionRetryLimit(segmentId))
                     {
                         var fallback = await TryFallbackSegmentsAsync(
@@ -687,7 +712,10 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                     OomDiagnostics.LogHeapStateOnOom(oom, "segment body retry");
                     throw;
                 }
-                catch (Exception e) when (!cancellationToken.IsCancellationRequested && e is not OutOfMemoryException)
+                catch (Exception e) when (
+                    !cancellationToken.IsCancellationRequested
+                    && e is not OutOfMemoryException
+                    && e is not PersistentUsenetCorruptionException)
                 {
                     if (attempt < MaxBodyRetries)
                     {
@@ -819,10 +847,35 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     {
         var estimate = GetPlannedSegmentBytes(segmentIndex);
         var lease = initialLease;
+        Exception? playbackFailFast = null;
         try
         {
-            ThrowIfPlaybackFailFast();
+            // The producer issued this batch before the task ran, so the response must
+            // always be owned here. A fail-fast check before the await would strand an
+            // already-on-the-wire body, and UsenetSharp's pump cannot release the shared
+            // batch connection until every handed-out stream is consumed or disposed.
             var response = await responseTask.ConfigureAwait(false);
+            if (PlaybackHoleTracker.ShouldFailFast(_fileName, out var failFast))
+            {
+                if (response.Stream is not null)
+                {
+                    try
+                    {
+                        await response.Stream.DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception disposeError) when (disposeError is not OutOfMemoryException)
+                    {
+                        Log.Debug(
+                            disposeError,
+                            "Failed to dispose pipelined BODY stream after playback fail-fast for {FileName}.",
+                            _fileName);
+                    }
+                }
+
+                playbackFailFast = failFast ?? new UsenetArticleNotFoundException(segmentId);
+                ExceptionDispatchInfo.Capture(playbackFailFast).Throw();
+            }
+
             await ThrowOnSegmentIdMismatchAsync(segmentId, response).ConfigureAwait(false);
 #pragma warning disable CA2000 // stream ownership transfers to the returned SegmentDownloadResult
             var drained = await DrainSegmentAsync(
@@ -831,6 +884,13 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 .ConfigureAwait(false);
             lease = null; // owned by BudgetedStream / buffer
             return ToDownloadResult(drained, estimate, segmentId);
+        }
+        catch (Exception) when (playbackFailFast is not null)
+        {
+            // A tracker-provided fail-fast bypasses the miss/corruption recovery below:
+            // those handlers can issue fallback or rescue requests on a path already
+            // declared dead, and a successful fallback would defeat the fail-fast.
+            throw;
         }
         catch (UsenetArticleNotFoundException e)
         {
@@ -878,7 +938,10 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
             OomDiagnostics.LogHeapStateOnOom(oom, "pipelined segment batch");
             throw;
         }
-        catch (Exception e) when (!cancellationToken.IsCancellationRequested && e is not OutOfMemoryException)
+        catch (Exception e) when (
+            !cancellationToken.IsCancellationRequested
+            && e is not OutOfMemoryException
+            && e is not PersistentUsenetCorruptionException)
         {
             // A failure inside a pipelined batch says nothing about whether the article
             // can be fetched at all: the batch shares one connection, so a stall or a
@@ -932,6 +995,9 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         CancellationToken cancellationToken)
     {
         var lease = existingLease;
+        var persistent = new PersistentCorruptionTracker();
+        if (batchFailure is UsenetCorruptArticleException corruptBatch)
+            persistent.NoteOrThrow(corruptBatch);
         try
         {
             for (var attempt = 1; attempt <= MaxBodyRetries; attempt++)
@@ -970,17 +1036,28 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 {
                     throw;
                 }
+                catch (PersistentUsenetCorruptionException)
+                {
+                    throw;
+                }
+                catch (UsenetCorruptArticleException e)
+                {
+                    persistent.NoteOrThrow(e);
+                    Log.Debug(e, "Individual rescue of segment {SegmentId} failed (attempt {Attempt}).",
+                        segmentId, attempt);
+                }
                 catch (OutOfMemoryException oom)
                 {
                     OomDiagnostics.LogHeapStateOnOom(oom, "individual segment rescue");
                     throw;
                 }
-                catch (Exception e) when (!cancellationToken.IsCancellationRequested && e is not OutOfMemoryException)
+                catch (Exception e) when (
+                    !cancellationToken.IsCancellationRequested
+                    && e is not OutOfMemoryException
+                    && e is not PersistentUsenetCorruptionException)
                 {
-                    // A corrupt rescue response is swallowed here and the original non-corrupt
+                    // A non-corrupt rescue failure is swallowed here and the original
                     // batch failure is surfaced as TransientSegmentExhaustionException.
-                    // Corruption evidence for this read is dropped; the next read hits the
-                    // proper corrupt path.
                     Log.Debug(e, "Individual rescue of segment {SegmentId} failed (attempt {Attempt}).",
                         segmentId, attempt);
                 }
@@ -1009,6 +1086,8 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     {
         var failure = initialFailure;
         var lease = existingLease;
+        var persistent = new PersistentCorruptionTracker();
+        persistent.NoteOrThrow(initialFailure);
         try
         {
             for (var attempt = 1; attempt <= GetCorruptionRetryLimit(segmentId); attempt++)
@@ -1045,6 +1124,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 }
                 catch (UsenetCorruptArticleException exception)
                 {
+                    persistent.NoteOrThrow(exception);
                     failure = exception;
                 }
             }

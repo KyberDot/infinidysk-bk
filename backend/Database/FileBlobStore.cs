@@ -73,8 +73,9 @@ public sealed class FileBlobStore : IBlobStore, IDisposable
         }
     }
 
-    public async Task WriteBlob<T>(Guid id, T blob)
+    public async Task WriteBlob<T>(Guid id, T blob, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var blobPath = GetBlobPath(id);
         var tempPath = blobPath + ".tmp";
         var committed = false;
@@ -83,8 +84,12 @@ public sealed class FileBlobStore : IBlobStore, IDisposable
             await using (var fileStream = OpenBlobWrite(tempPath))
             await using (var compressionStream = new CompressionStream(fileStream, CompressionLevel))
             {
-                await MemoryPackSerializer.SerializeAsync(compressionStream, blob).ConfigureAwait(false);
+                // CPU-bound serialization may finish before the token is observed;
+                // ThrowIfCancellationRequested and temp-file cleanup still honor it.
+                await MemoryPackSerializer.SerializeAsync(compressionStream, blob, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
             }
+            cancellationToken.ThrowIfCancellationRequested();
 
             CommitBlobWrite(blobPath, tempPath);
             committed = true;
@@ -152,21 +157,36 @@ public sealed class FileBlobStore : IBlobStore, IDisposable
         }
     }
 
-    public void Delete(Guid id)
+    public bool Delete(Guid id)
     {
         _metadataCache.Remove(id);
         var blobPath = GetBlobPath(id);
-
-        if (File.Exists(blobPath))
-            File.Delete(blobPath);
+        var deleted = false;
 
         lock (_lockObj)
         {
+            try
+            {
+                File.GetAttributes(blobPath);
+                File.Delete(blobPath);
+                deleted = true;
+            }
+            catch (FileNotFoundException)
+            {
+                // The blob is already absent; the cleanup operation is idempotent.
+            }
+            catch (DirectoryNotFoundException)
+            {
+                // The blob's sharded directory is already absent.
+            }
+
             var nextTwoDir = Path.GetDirectoryName(blobPath);
             var firstTwoDir = Path.GetDirectoryName(nextTwoDir);
             TryDeleteEmptyDirectory(nextTwoDir);
             TryDeleteEmptyDirectory(firstTwoDir);
         }
+
+        return deleted;
     }
 
     public void Dispose()

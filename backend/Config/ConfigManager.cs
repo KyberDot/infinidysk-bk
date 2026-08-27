@@ -1226,10 +1226,10 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     public string GetRepairPatchStorePath()
         => Path.Join(DavDatabaseContext.ConfigPath, "repair-segments");
 
-    // When true, RAR archives are mounted instantly by parsing only the first
-    // volume at import; trailing volumes are resolved on first read. Falls
-    // back to eager parsing for archives that don't fit the supported shape
-    // (multi-file, solid, encrypted, or compressed).
+    // When true, RAR archives are mounted quickly by parsing the first volume
+    // and validating cached continuation headers at import; trailing ranges
+    // are resolved on first read. Falls back to eager parsing for archives
+    // that don't fit the supported shape (multi-file, solid, or compressed).
     public bool IsLazyRarParsingEnabled()
     {
         var v = StringUtil.EmptyToNull(GetConfigValue(ConfigKeys.ApiLazyRarParsing));
@@ -1308,6 +1308,24 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
             .Select(x => x.ToLowerInvariant())
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .ToHashSet();
+    }
+
+    private static readonly HashSet<string> DefaultMediaReadinessCategories =
+        new(StringComparer.OrdinalIgnoreCase) { "tv", "movies", "movie", "series", "audio" };
+
+    /// <summary>
+    /// Categories whose media outputs get a BODY-level head/tail readiness probe before
+    /// SAB reports completion. Always includes the explicit article-existence categories;
+    /// when ensure-importable-video is enabled, the common media categories are included
+    /// too so a short-decoded or unseekable file fails into history before Arr/rclone
+    /// reads it, rather than after.
+    /// </summary>
+    public HashSet<string> GetMediaReadinessCategories()
+    {
+        var categories = GetEnsureArticleExistenceCategories();
+        if (IsEnsureImportableMediaEnabled())
+            categories.UnionWith(DefaultMediaReadinessCategories);
+        return categories;
     }
 
     public string GetArticleExistenceCheckMode()
