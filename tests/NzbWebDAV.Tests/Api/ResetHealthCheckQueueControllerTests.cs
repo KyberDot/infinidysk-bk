@@ -43,18 +43,22 @@ public sealed class ResetHealthCheckQueueControllerTests : IAsyncLifetime
     {
         var scheduled = NewItem("scheduled.mkv", DavItem.ItemType.UsenetFile, DateTimeOffset.UtcNow.AddDays(1));
         var uncheckedFile = NewItem("unchecked.mkv", DavItem.ItemType.UsenetFile, null);
+        var sidecar = NewItem("cover.jpg", DavItem.ItemType.UsenetFile, DateTimeOffset.UtcNow.AddDays(1));
         var urgent = NewItem("urgent.mkv", DavItem.ItemType.UsenetFile, DateTimeOffset.UnixEpoch);
         var directory = NewItem("directory", DavItem.ItemType.Directory, DateTimeOffset.UtcNow.AddDays(1));
-        _context.Items.AddRange(scheduled, uncheckedFile, urgent, directory);
+        _context.Items.AddRange(scheduled, uncheckedFile, sidecar, urgent, directory);
         await _context.SaveChangesAsync();
         _context.ChangeTracker.Clear();
 
         var response = await InvokeAsync();
 
+        // Only executable health-check candidates are counted; the non-media sidecar is
+        // marked but skipped by the checker's candidate filter.
         Assert.Equal(2, response.ResetCount);
         var updated = await _context.Items.ToDictionaryAsync(x => x.Id);
         Assert.Equal(HealthCheckService.ForcedRecheckSentinel, updated[scheduled.Id].NextHealthCheck);
         Assert.Equal(HealthCheckService.ForcedRecheckSentinel, updated[uncheckedFile.Id].NextHealthCheck);
+        Assert.Equal(HealthCheckService.ForcedRecheckSentinel, updated[sidecar.Id].NextHealthCheck);
         Assert.Equal(DateTimeOffset.UnixEpoch, updated[urgent.Id].NextHealthCheck);
         Assert.NotNull(updated[directory.Id].NextHealthCheck);
         Assert.NotEqual(HealthCheckService.ForcedRecheckSentinel, updated[directory.Id].NextHealthCheck);
