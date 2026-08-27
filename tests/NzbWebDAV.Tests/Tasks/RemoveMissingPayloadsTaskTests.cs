@@ -420,7 +420,9 @@ public sealed class RemoveMissingPayloadsTaskTests
             Assert.True(File.Exists(linkPath));
             Assert.Contains(replacementId.ToString(), await File.ReadAllTextAsync(linkPath));
             Assert.Equal(0, arr.RemoveCalls);
-            Assert.Contains("link changed", RemoveMissingPayloadsTask.GetAuditReport());
+            Assert.Contains(
+                "changed after it was scanned",
+                RemoveMissingPayloadsTask.GetAuditReport());
         }
         finally
         {

@@ -164,7 +164,7 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
             }
 
             if (!_isDryRun)
-                ConsumePreviewApproval();
+                ConsumePreviewApproval(_previewToken);
             Complete("Done. No missing streaming payloads found.");
             return;
         }
@@ -257,7 +257,7 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
 
         await DeleteItemsAsync(readyForDelete, startedAt).ConfigureAwait(false);
 
-        ConsumePreviewApproval();
+        ConsumePreviewApproval(_previewToken);
         Complete(
             $"Done. Removed {_stats.RemovedItems} missing-payload item" +
             $"{(_stats.RemovedItems == 1 ? "" : "s")} and {_stats.RemovedLinks} library link" +
@@ -292,8 +292,10 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
 
             foreach (var item in batch)
             {
-                if (!await dbClient.StreamingPayloadExistsAsync(item, CancellationToken).ConfigureAwait(false))
-                    candidates.Add(item);
+                if (await dbClient.StreamingPayloadExistsAsync(item, CancellationToken).ConfigureAwait(false))
+                    continue;
+
+                candidates.Add(item);
             }
 
             scanned += batch.Count;
@@ -845,9 +847,8 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
             CancellationToken.ThrowIfCancellationRequested();
             await using var context = CreateContext();
             var directories = new List<DavItem>();
-            foreach (var chunk in pendingIds.Chunk(500))
+            foreach (var ids in pendingIds.Chunk(500).Select(chunk => chunk.ToArray()))
             {
-                var ids = chunk.ToArray();
                 directories.AddRange(await context.Items
                     .Where(item => ids.Contains(item.Id))
                     .Where(item => item.SubType == DavItem.ItemSubType.Directory)
@@ -861,9 +862,12 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
             if (directories.Count == 0)
                 break;
 
+            var isPostgres = context.Database.IsNpgsql();
             var candidates = directories.Select(item =>
                 new RemoveUnlinkedFilesTask.UnlinkedItemInfo(
-                    item.Id.ToString(),
+                    isPostgres
+                        ? item.Id.ToString()
+                        : item.Id.ToString().ToUpperInvariant(),
                     (int)item.Type,
                     item.Path)).ToArray();
             var deletedCount = 0;
@@ -880,9 +884,8 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
 
             var candidateIds = directories.Select(item => item.Id).ToArray();
             var survivors = new HashSet<Guid>();
-            foreach (var chunk in candidateIds.Chunk(500))
+            foreach (var ids in candidateIds.Chunk(500).Select(chunk => chunk.ToArray()))
             {
-                var ids = chunk.ToArray();
                 var found = await context.Items
                     .AsNoTracking()
                     .Where(item => ids.Contains(item.Id))
@@ -1082,14 +1085,14 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
         return true;
     }
 
-    private void ConsumePreviewApproval()
+    private static void ConsumePreviewApproval(string? previewToken)
     {
-        if (!_requirePreviewApproval || string.IsNullOrWhiteSpace(_previewToken))
+        if (string.IsNullOrWhiteSpace(previewToken))
             return;
 
         lock (PreviewLock)
         {
-            if (string.Equals(_previewApproval?.Token, _previewToken, StringComparison.Ordinal))
+            if (string.Equals(_previewApproval?.Token, previewToken, StringComparison.Ordinal))
                 _previewApproval = null;
         }
     }

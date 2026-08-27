@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Net;
+using System.Text.Json;
 using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using NzbWebDAV.Clients.RadarrSonarr.RadarrModels;
 using Serilog;
@@ -68,18 +69,37 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                 ct).ConfigureAwait(false);
             return ArrMissingPayloadCleanupOutcome.RemovedSearchRequested;
         }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
         {
-            Log.Warning(
-                "Radarr missing-payload cleanup on {Host}: movie file {MovieFileId} was removed, " +
-                "but replacement search failed. Reason: {Reason}",
-                Host,
-                match.FileId,
-                ex.Message);
-            Log.Debug(ex, "Radarr missing-payload replacement-search failure stack");
-            return ArrMissingPayloadCleanupOutcome.RemovedSearchFailed;
+            return LogMissingPayloadSearchFailure(ex, match.FileId);
         }
+        catch (OperationCanceledException) { throw; }
+        catch (HttpRequestException ex)
+        {
+            return LogMissingPayloadSearchFailure(ex, match.FileId);
+        }
+        catch (InvalidDataException ex)
+        {
+            return LogMissingPayloadSearchFailure(ex, match.FileId);
+        }
+        catch (JsonException ex)
+        {
+            return LogMissingPayloadSearchFailure(ex, match.FileId);
+        }
+    }
+
+    private ArrMissingPayloadCleanupOutcome LogMissingPayloadSearchFailure(
+        Exception exception,
+        int movieFileId)
+    {
+        Log.Warning(
+            "Radarr missing-payload cleanup on {Host}: movie file {MovieFileId} was removed, " +
+            "but replacement search failed. Reason: {Reason}",
+            Host,
+            movieFileId,
+            exception.Message);
+        Log.Debug(exception, "Radarr missing-payload replacement-search failure stack");
+        return ArrMissingPayloadCleanupOutcome.RemovedSearchFailed;
     }
 
     public override async Task<ArrRepairOutcome> RemoveAndBlocklist(
