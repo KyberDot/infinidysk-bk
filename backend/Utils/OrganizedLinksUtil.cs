@@ -117,7 +117,7 @@ public static class OrganizedLinksUtil
         var fullPath = Path.GetFullPath(expected.LinkPath);
         if (!StillTargets(expected, configManager))
             throw new InvalidOperationException($"Library link '{fullPath}' changed after it was scanned.");
-        if (CreateStrmFilesPostProcessor.HasSymlinkedAncestor(fullPath, fullRoot))
+        if (HasSymlinkedAncestorBelowRoot(fullPath, fullRoot))
         {
             throw new InvalidOperationException(
                 $"Library link '{fullPath}' has a symlinked ancestor and cannot be removed safely.");
@@ -151,6 +151,31 @@ public static class OrganizedLinksUtil
         return new QuarantinedLink(expected, fullPath, quarantinePath);
     }
 
+    private static bool HasSymlinkedAncestorBelowRoot(string path, string root)
+    {
+        var normalizedRoot = Path.GetFullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var directoryPath = Path.GetDirectoryName(Path.GetFullPath(path));
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        while (directoryPath is not null)
+        {
+            var normalizedDirectory = directoryPath
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            // The scanner deliberately supports a configured library root that is itself
+            // a symlink (-H on Linux). Only descendants below that trusted root are rejected.
+            if (string.Equals(normalizedDirectory, normalizedRoot, comparison))
+                return false;
+            if (new DirectoryInfo(directoryPath).LinkTarget is not null)
+                return true;
+
+            directoryPath = Path.GetDirectoryName(directoryPath);
+        }
+
+        return true;
+    }
+
     internal static bool TryRestoreQuarantinedLink(QuarantinedLink quarantined)
     {
         if (!PathEntryExists(quarantined.QuarantinePath))
@@ -182,7 +207,7 @@ public static class OrganizedLinksUtil
         File.Delete(quarantined.QuarantinePath);
     }
 
-    private static bool PathEntryExists(string path)
+    internal static bool PathEntryExists(string path)
     {
         try
         {

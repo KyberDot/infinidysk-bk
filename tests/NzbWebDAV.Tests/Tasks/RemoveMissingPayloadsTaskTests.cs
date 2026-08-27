@@ -164,6 +164,88 @@ public sealed class RemoveMissingPayloadsTaskTests
     }
 
     [Fact]
+    public async Task Execute_RetainsItemWhenGeneratedSidecarStillTargetsItOutsideLibrary()
+    {
+        await BaseTask.ResetRunningTaskForTestsAsync();
+        var libraryDir = NewTempDirectory();
+        var outputRoot = NewTempDirectory();
+        await using var db = await TempDb.CreateAsync();
+        try
+        {
+            var (_, _, item) = await SeedMissingItemAsync(db.Context);
+            var sidecarPath = Path.Join(outputRoot, "episode.strm");
+            item.GeneratedStrmOutputRoot = outputRoot;
+            item.GeneratedStrmPath = sidecarPath;
+            item.GeneratedStrmTarget =
+                $"http://original.test/view/.ids/{item.Id}.mkv";
+            await db.Context.SaveChangesAsync();
+            await File.WriteAllTextAsync(
+                sidecarPath,
+                $"http://changed.test/view/.ids/{item.Id}.mkv");
+            var task = NewTask(
+                db,
+                libraryDir,
+                new TrackingBlobStore(),
+                [],
+                isDryRun: false);
+
+            Assert.True(await task.Execute());
+
+            Assert.True(await ItemExistsAsync(db, item.Id));
+            Assert.True(File.Exists(sidecarPath));
+            Assert.Equal(1, task.Stats.SkippedItems);
+            Assert.Contains(
+                "generated STRM sidecar could not be removed safely",
+                RemoveMissingPayloadsTask.GetAuditReport());
+        }
+        finally
+        {
+            await ResetAsync(libraryDir);
+            try { Directory.Delete(outputRoot, recursive: true); } catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Execute_AllowsConfiguredLibraryRootThatIsSymlink()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await BaseTask.ResetRunningTaskForTestsAsync();
+        var physicalLibraryDir = NewTempDirectory();
+        var libraryDir = Path.Join(
+            Path.GetTempPath(),
+            $"nzbdav-missing-payload-link-{Guid.NewGuid():N}");
+        Directory.CreateSymbolicLink(libraryDir, physicalLibraryDir);
+        await using var db = await TempDb.CreateAsync();
+        try
+        {
+            var (_, _, item) = await SeedMissingItemAsync(db.Context);
+            var linkPath = await WriteStrmAsync(libraryDir, "episode.strm", item.Id);
+            var task = NewTask(
+                db,
+                libraryDir,
+                new TrackingBlobStore(),
+                [],
+                isDryRun: false);
+
+            Assert.True(await task.Execute());
+
+            Assert.False(await ItemExistsAsync(db, item.Id));
+            Assert.False(File.Exists(linkPath));
+            Assert.Equal(1, task.Stats.RemovedLinks);
+        }
+        finally
+        {
+            await BaseTask.ResetRunningTaskForTestsAsync();
+            RemoveMissingPayloadsTask.ClearAuditForTests();
+            RemoveMissingPayloadsTask.ClearPreviewApprovalForTests();
+            try { Directory.Delete(libraryDir); } catch (IOException) { /* best effort */ }
+            try { Directory.Delete(physicalLibraryDir, recursive: true); } catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
     public async Task Execute_LeavesItemWhenArrOwnershipCannotBeChecked()
     {
         await BaseTask.ResetRunningTaskForTestsAsync();

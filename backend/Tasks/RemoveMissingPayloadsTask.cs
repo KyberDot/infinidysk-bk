@@ -784,16 +784,7 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
         {
             if (!CreateStrmFilesPostProcessor.DeleteStrmFile(item))
             {
-                if (!string.IsNullOrWhiteSpace(item.GeneratedStrmPath)
-                    && OrganizedLinksUtil.PathStillTargets(
-                        item.GeneratedStrmPath,
-                        item.Id,
-                        _configManager))
-                {
-                    return false;
-                }
-
-                return true;
+                return CanProveGeneratedSidecarNoLongerTargetsItem(item);
             }
 
             _stats.RemovedSidecars++;
@@ -812,6 +803,32 @@ public sealed class RemoveMissingPayloadsTask : BaseTask
                 $"SIDECAR-FAILED\t{item.Path}\tpath={item.GeneratedStrmPath}\treason={e.Message}");
             return false;
         }
+    }
+
+    private static bool CanProveGeneratedSidecarNoLongerTargetsItem(DavItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.GeneratedStrmPath))
+            return true;
+        if (!OrganizedLinksUtil.PathEntryExists(item.GeneratedStrmPath))
+            return true;
+        if (string.IsNullOrWhiteSpace(item.GeneratedStrmOutputRoot))
+            return false;
+
+        var outputRoot = Path.GetFullPath(item.GeneratedStrmOutputRoot);
+        var sidecarPath = Path.GetFullPath(item.GeneratedStrmPath);
+        if (!CreateStrmFilesPostProcessor.IsPathWithinRoot(sidecarPath, outputRoot)
+            || CreateStrmFilesPostProcessor.HasSymlinkedAncestor(sidecarPath, outputRoot))
+        {
+            return false;
+        }
+
+        var current = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(sidecarPath));
+        if (current is null)
+            return true;
+        if (current is not SymlinkAndStrmUtil.StrmInfo strm)
+            return false;
+
+        return OrganizedLinksUtil.GetDavItemLink(strm)?.DavItemId != item.Id;
     }
 
     private async Task RemoveEmptyAncestorDirectoriesAsync(
