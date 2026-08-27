@@ -55,9 +55,9 @@ export function ResetHealthCheckQueue() {
       </Alert>
 
       <p className="text-sm leading-relaxed text-base-content/70">
-        Queue a fresh background health-check pass over every video, audio, and archive file in
-        the library. Checks run a few files at a time, pause while downloads are processing, and
-        can generate significant Usenet (STAT) traffic on large libraries.
+        Queue a fresh background health-check pass over every video, audio, and archive file in the
+        library. Checks run a few files at a time, pause while downloads are processing, and can
+        generate significant Usenet (STAT) traffic on large libraries.
       </p>
 
       <div className="rounded-lg border border-base-content/10 bg-base-200/40 p-3">
