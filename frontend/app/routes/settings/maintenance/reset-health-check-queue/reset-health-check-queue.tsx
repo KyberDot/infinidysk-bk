@@ -12,7 +12,7 @@ export function ResetHealthCheckQueue() {
   const onQueue = useCallback(async () => {
     if (
       !window.confirm(
-        "Queue a fresh health-check pass over every library file? " +
+        "Queue a fresh health-check pass over every video, audio, and archive file in the library? " +
           "This generates significant Usenet (STAT) traffic on large libraries.",
       )
     ) {
@@ -46,7 +46,7 @@ export function ResetHealthCheckQueue() {
       <Alert className="alert-soft items-start py-3 text-sm" variant="info">
         <Icon name="info" className="!text-[20px]" />
         <div>
-          <p className="font-semibold">Covers the whole library</p>
+          <p className="font-semibold">Covers your whole media library</p>
           <p className="mt-0.5 text-xs opacity-80">
             Includes files still present in SAB history — no history is deleted. Existing
             health-check results and statistics are kept.
@@ -55,9 +55,9 @@ export function ResetHealthCheckQueue() {
       </Alert>
 
       <p className="text-sm leading-relaxed text-base-content/70">
-        Queue a fresh background health-check pass over every library file. Checks run a few files
-        at a time, pause while downloads are processing, and can generate significant Usenet (STAT)
-        traffic on large libraries.
+        Queue a fresh background health-check pass over every video, audio, and archive file in
+        the library. Checks run a few files at a time, pause while downloads are processing, and
+        can generate significant Usenet (STAT) traffic on large libraries.
       </p>
 
       <div className="rounded-lg border border-base-content/10 bg-base-200/40 p-3">
