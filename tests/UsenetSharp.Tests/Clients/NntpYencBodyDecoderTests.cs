@@ -29,6 +29,30 @@ public class NntpYencBodyDecoderTests
     }
 
     [Test]
+    public async Task DecodeAsync_PayloadBandwidthAcquirer_RunsBeforeConsumerSeesBytes()
+    {
+        var body = YencWireBodies.SinglePart([0x04, 0x05, 0x06]);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acquired = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var decodeTask = DecodeAsync(
+            body.Wire,
+            [int.MaxValue],
+            payloadBandwidthAcquirer: async (bytes, _) =>
+            {
+                acquired.TrySetResult(bytes);
+                await release.Task;
+            });
+
+        var charged = await acquired.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.That(decodeTask.IsCompleted, Is.False);
+        release.SetResult();
+
+        var result = await decodeTask.WaitAsync(TimeSpan.FromSeconds(2));
+        AssertSuccessful(result, body);
+        Assert.That(charged, Is.EqualTo(body.Decoded.Length));
+    }
+
+    [Test]
     public async Task DecodeAsync_AllByteValues_RoundTrips()
     {
         var decoded = Enumerable.Range(0, 256).Select(value => (byte)value).ToArray();
@@ -410,7 +434,8 @@ public class NntpYencBodyDecoderTests
         bool readFollowingLine = false,
         TimeProvider? timeProvider = null,
         TimeSpan? readTimeout = null,
-        FragmentedReadStream? source = null)
+        FragmentedReadStream? source = null,
+        Func<int, CancellationToken, ValueTask>? payloadBandwidthAcquirer = null)
     {
         source ??= new FragmentedReadStream(wireBody, fragmentSizes);
         using var reader = new NntpLineReader(source, maximumLineLength, readerBufferSize);
@@ -435,7 +460,8 @@ public class NntpYencBodyDecoderTests
             CrcValidation = crcMode,
             AbandonedBodyDrainLimit = drainLimit,
             DecodedBodyPauseWriterThreshold = pauseWriterThreshold,
-            DecodedBodyResumeWriterThreshold = resumeWriterThreshold
+            DecodedBodyResumeWriterThreshold = resumeWriterThreshold,
+            PayloadBandwidthAcquirer = payloadBandwidthAcquirer,
         };
 
         var decoder = new NntpYencBodyDecoder(

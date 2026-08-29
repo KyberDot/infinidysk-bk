@@ -66,6 +66,15 @@ public sealed record UsenetClientOptions
     public Action<long>? DecodedBodyBufferedBytesObserver { get; init; }
 
     /// <summary>
+    /// Optional hook invoked with payload byte counts before those bytes are
+    /// flushed to consumers. Charged sources are decoded BODY as produced, raw
+    /// BODY lines as written, and drain loops. STAT/HEAD/command traffic is never
+    /// charged. Implementations may delay to apply a process-wide cap; the wait
+    /// must not be treated as an NNTP read timeout.
+    /// </summary>
+    public Func<int, CancellationToken, ValueTask>? PayloadBandwidthAcquirer { get; init; }
+
+    /// <summary>
     /// Gets how cancelled body transfers release the connection.
     /// </summary>
     /// <remarks>

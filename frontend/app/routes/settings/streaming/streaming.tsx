@@ -1,4 +1,4 @@
-import { type Dispatch, type SetStateAction } from "react";
+import { type Dispatch, type SetStateAction, useState } from "react";
 import {
   Alert,
   Badge,
@@ -14,6 +14,7 @@ import {
   Tooltip,
 } from "~/components/ui";
 import { className } from "~/utils/styling";
+import { useWebsocketTopic } from "~/utils/shared-websocket";
 import { isPositiveInteger } from "../validation";
 
 type StreamingSettingsProps = {
@@ -22,11 +23,34 @@ type StreamingSettingsProps = {
   effectiveArticleBudgetBytes?: number | null;
 };
 
+type BandwidthLimitLiveStats = {
+  enabled: boolean;
+  limitBytesPerSecond?: number;
+  currentBytesPerSecond?: number;
+};
+
 export function StreamingSettings({
   config,
   setNewConfig,
   effectiveArticleBudgetBytes = null,
 }: StreamingSettingsProps) {
+  const [bandwidthLive, setBandwidthLive] = useState<BandwidthLimitLiveStats | null>(null);
+  useWebsocketTopic("bwl", "state", (message) => {
+    try {
+      const parsed = JSON.parse(message) as BandwidthLimitLiveStats;
+      setBandwidthLive(parsed);
+    } catch {
+      // Ignore malformed frames; the next tick replaces them.
+    }
+  });
+
+  const bandwidthLimit = config["usenet.bandwidth-limit-mbps"] ?? "";
+  const parsedBandwidthLimit = Number(bandwidthLimit);
+  const showLowLimitWarning =
+    bandwidthLimit.trim() !== "" &&
+    Number.isFinite(parsedBandwidthLimit) &&
+    parsedBandwidthLimit > 0 &&
+    parsedBandwidthLimit < 2;
   const effectiveArticleBudgetMiB =
     effectiveArticleBudgetBytes !== null && effectiveArticleBudgetBytes > 0
       ? Math.round(effectiveArticleBudgetBytes / (1024 * 1024))
@@ -488,6 +512,54 @@ export function StreamingSettings({
           </div>
         </ManagedSetting>
 
+        <ManagedSetting configKey="usenet.bandwidth-limit-mbps">
+          <div className="space-y-2">
+            <label
+              className="block text-sm font-medium text-base-content"
+              htmlFor="bandwidth-limit-input"
+            >
+              Global Usenet bandwidth limit (Mbit/s)
+            </label>
+            <Input
+              {...className([
+                "w-full",
+                !isValidUsenetBandwidthLimitMbps(bandwidthLimit) && "input-error",
+              ])}
+              type="text"
+              inputMode="decimal"
+              id="bandwidth-limit-input"
+              aria-describedby="bandwidth-limit-help"
+              placeholder="Unlimited"
+              value={bandwidthLimit}
+              onChange={(e) =>
+                setNewConfig({
+                  ...config,
+                  "usenet.bandwidth-limit-mbps": e.target.value,
+                })
+              }
+            />
+            <p
+              className="text-[11px] leading-relaxed text-base-content/45"
+              id="bandwidth-limit-help"
+            >
+              Caps live download from all providers. 1 MB/s = 8 Mbit/s. Applies to queue downloads
+              and streaming. Speed tests, cache hits, and LAN delivery are never limited. Leave
+              empty or 0 for unlimited.
+            </p>
+            {showLowLimitWarning && (
+              <Alert className="alert-soft items-start text-xs" variant="warning">
+                Limits below 2 Mbit/s can stall playback and queue progress.
+              </Alert>
+            )}
+            {bandwidthLive?.enabled && (
+              <p className="font-mono text-xs text-base-content/70">
+                Current {formatMbitPerSecond(bandwidthLive.currentBytesPerSecond)} /{" "}
+                {formatMbitPerSecond(bandwidthLive.limitBytesPerSecond)} Mbit/s
+              </p>
+            )}
+          </div>
+        </ManagedSetting>
+
         <ManagedSetting configKey="usenet.idle-connection-timeout-seconds">
           <div className="space-y-2">
             <label
@@ -918,6 +990,7 @@ export function isStreamingSettingsUpdated(
     config["usenet.article-buffer-size"] !== newConfig["usenet.article-buffer-size"] ||
     config["usenet.in-flight-article-budget-mb"] !==
       newConfig["usenet.in-flight-article-budget-mb"] ||
+    config["usenet.bandwidth-limit-mbps"] !== newConfig["usenet.bandwidth-limit-mbps"] ||
     config["usenet.idle-connection-timeout-seconds"] !==
       newConfig["usenet.idle-connection-timeout-seconds"] ||
     config["usenet.nntp-read-timeout-seconds"] !== newConfig["usenet.nntp-read-timeout-seconds"] ||
@@ -957,6 +1030,7 @@ export function isStreamingSettingsValid(config: Record<string, string>): boolea
     isValidStreamingSegmentRetries(config["usenet.streaming-segment-retries"] ?? "") &&
     isValidArticleBufferSize(config["usenet.article-buffer-size"] ?? "") &&
     isValidInFlightArticleBudget(config["usenet.in-flight-article-budget-mb"]) &&
+    isValidUsenetBandwidthLimitMbps(config["usenet.bandwidth-limit-mbps"]) &&
     isValidIdleConnectionTimeout(config["usenet.idle-connection-timeout-seconds"]) &&
     isValidNntpReadTimeout(config["usenet.nntp-read-timeout-seconds"]) &&
     isValidReconnectDelay(config["usenet.reconnect-delay-milliseconds"]) &&
@@ -1016,6 +1090,17 @@ function isValidInFlightArticleBudget(value: string | undefined): boolean {
   if (value == null || value.trim() === "") return true;
   const number = Number(value);
   return Number.isInteger(number) && number >= 64 && number <= 8192;
+}
+
+function isValidUsenetBandwidthLimitMbps(value: string | undefined): boolean {
+  if (value == null || value.trim() === "") return true;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0;
+}
+
+function formatMbitPerSecond(bytesPerSecond: number | undefined): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return "0.00";
+  return (bytesPerSecond / 125_000).toFixed(2);
 }
 
 function isValidIdleConnectionTimeout(value: string | undefined): boolean {

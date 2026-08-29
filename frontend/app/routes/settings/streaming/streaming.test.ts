@@ -3,7 +3,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement, useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("~/utils/shared-websocket", () => ({
+  useWebsocketTopic: vi.fn(),
+}));
 import {
   isStreamingSettingsUpdated,
   isStreamingSettingsValid,
@@ -21,6 +25,7 @@ const validConfig = {
   "usenet.streaming-segment-retries": "3",
   "usenet.article-buffer-size": "40",
   "usenet.in-flight-article-budget-mb": "",
+  "usenet.bandwidth-limit-mbps": "",
   "usenet.idle-connection-timeout-seconds": "60",
   "usenet.nntp-read-timeout-seconds": "30",
   "usenet.reconnect-delay-milliseconds": "500",
@@ -242,6 +247,24 @@ describe("Streaming settings", () => {
       isStreamingSettingsValid({
         ...validConfig,
         "usenet.streaming-body-batch-width": "abc",
+      }),
+    ).toBe(false);
+    expect(
+      isStreamingSettingsValid({
+        ...validConfig,
+        "usenet.bandwidth-limit-mbps": "8",
+      }),
+    ).toBe(true);
+    expect(
+      isStreamingSettingsValid({
+        ...validConfig,
+        "usenet.bandwidth-limit-mbps": "0",
+      }),
+    ).toBe(true);
+    expect(
+      isStreamingSettingsValid({
+        ...validConfig,
+        "usenet.bandwidth-limit-mbps": "-1",
       }),
     ).toBe(false);
     expect(

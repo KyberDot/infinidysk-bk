@@ -91,6 +91,7 @@ const defaultConfig = {
   "usenet.streaming-segment-retries": "3",
   "usenet.article-buffer-size": "40",
   "usenet.in-flight-article-budget-mb": "",
+  "usenet.bandwidth-limit-mbps": "",
   "usenet.idle-connection-timeout-seconds": "60",
   "usenet.nntp-read-timeout-seconds": "30",
   "usenet.reconnect-delay-milliseconds": "500",

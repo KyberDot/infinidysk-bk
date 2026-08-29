@@ -448,12 +448,14 @@ public class UsenetStreamingClient : WrappingNntpClient
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
         TimeSpan readTimeout,
-        CancellationToken ct
+        CancellationToken ct,
+        bool applyBandwidthLimit = true
     ) => CreateNewConnection(
         connectionDetails,
         () => new BaseNntpClient(
             connectionDetails.UseSsl && connectionDetails.SkipTlsVerification,
-            readTimeout),
+            readTimeout,
+            applyBandwidthLimit),
         ct);
 
     internal static async ValueTask<INntpClient> CreateNewConnection

@@ -24,7 +24,8 @@ internal sealed class BenchmarkConnectionLadder(
 
     internal Func<UsenetProviderConfig.ConnectionDetails, TimeSpan, CancellationToken, ValueTask<INntpClient>>
         CreateConnection { get; init; } =
-        static (details, timeout, ct) => UsenetStreamingClient.CreateNewConnection(details, timeout, ct);
+        static (details, timeout, ct) =>
+            UsenetStreamingClient.CreateNewConnection(details, timeout, ct, applyBandwidthLimit: false);
 
     /// <summary>Grows the ladder to <paramref name="target"/> connections; returns the achieved count.</summary>
     public async Task<int> EnsureAsync(int target, CancellationToken ct)

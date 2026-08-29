@@ -26,6 +26,14 @@ public partial class UsenetClient
         _stream = stream;
     }
 
+    private ValueTask ChargePayloadBandwidthAsync(int bytes, CancellationToken cancellationToken)
+    {
+        var acquirer = _options.PayloadBandwidthAcquirer;
+        if (acquirer is null || bytes <= 0)
+            return ValueTask.CompletedTask;
+        return acquirer(bytes, cancellationToken);
+    }
+
     private void CleanupConnection(bool createNewLifetime = true)
     {
         Volatile.Write(ref _connectionState, 0);
