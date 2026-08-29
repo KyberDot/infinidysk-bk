@@ -27,7 +27,22 @@ internal sealed class AdminOpenApiOperationTransformer : IOpenApiOperationTransf
         operation.Summary = HumanizeControllerName(descriptor.ControllerName);
         AddKnownFormRequestBody(operation, route, verb);
         operation.Responses ??= [];
-        if (!operation.Responses.ContainsKey("200"))
+        if (route == "api/trigger-health-check")
+        {
+            operation.Responses.Remove("200");
+            operation.Responses["202"] = new OpenApiResponse
+            {
+                Description = "Accepted. The health-check run was queued.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchemaReference("TriggerHealthCheckResponse"),
+                    },
+                },
+            };
+        }
+        if (!operation.Responses.ContainsKey("200") && !operation.Responses.ContainsKey("202"))
             operation.Responses["200"] = new OpenApiResponse { Description = "Success." };
         ApplyMissingPayloadContractOverrides(operation, route, verb);
         ApplyGcDiagnosticsContractOverrides(operation, route, verb);

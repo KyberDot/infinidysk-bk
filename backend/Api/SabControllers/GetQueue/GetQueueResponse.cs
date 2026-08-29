@@ -30,8 +30,8 @@ public class GetQueueResponse : SabBaseResponse
         [JsonPropertyName("speedlimit_abs")]
         public string SpeedLimitAbs { get; init; } = "0";
 
-        // Seconds remaining on a scheduled/timed unpause. NzbDAV's pause has no
-        // duration, so this is always "0".
+        // Seconds remaining until a scheduled download window reopens. Manual SAB
+        // pause reports "0" because it has no duration.
         [JsonPropertyName("pause_int")]
         public string PauseInt { get; init; } = "0";
 

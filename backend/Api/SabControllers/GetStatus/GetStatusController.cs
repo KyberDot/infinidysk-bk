@@ -17,7 +17,7 @@ public class GetStatusController(
             Status = new SabStatusObject
             {
                 CompleteDir = SabPathResolver.GetCompletedDir(Config),
-                Paused = Config.IsSabQueuePaused(),
+                Paused = Config.IsQueueEffectivelyPaused(),
                 SpeedLimit = speedLimitKbps.ToString(),
                 SpeedLimitAbs = speedLimitKbps.ToString(),
             },

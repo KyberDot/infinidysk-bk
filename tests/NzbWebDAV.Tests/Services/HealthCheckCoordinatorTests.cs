@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.RadarrSonarr;
 using NzbWebDAV.Config;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
@@ -241,6 +242,59 @@ public sealed class HealthCheckCoordinatorTests
         Assert.Equal(
             harness.Service.CoordinatorIdleInterval,
             harness.Service.GetCoordinatorWaitInterval(outcome));
+    }
+
+    [Fact]
+    public async Task ClosedSchedules_BlockNewWorkers()
+    {
+        using var harness = new Harness(workers: 2, fullySplit: false);
+        harness.CloseHealthSchedules();
+        var selectorCalled = false;
+        harness.Service.SelectCandidateOverride = (_, _, _) =>
+        {
+            selectorCalled = true;
+            return Task.FromResult<Guid?>(Guid.NewGuid());
+        };
+
+        var outcome = await harness.Service.RefillWorkerSlotsAsync(CancellationToken.None);
+
+        Assert.Equal(HealthCheckRefillOutcome.Blocked, outcome);
+        Assert.False(selectorCalled);
+        Assert.Empty(harness.Service.InProgressHealthCheckIds);
+    }
+
+    [Fact]
+    public async Task ManualRun_OpensChecksOnlyUntilDueWorkDrains()
+    {
+        using var harness = new Harness(workers: 1, fullySplit: false);
+        harness.CloseHealthSchedules();
+        var id = Guid.NewGuid();
+        var candidates = new Queue<Guid>([id]);
+        var blocker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        HealthWorkAdmission? observedAdmission = null;
+        harness.Service.SelectCandidateOverride = (_, admission, _) =>
+        {
+            observedAdmission = admission;
+            return Task.FromResult<Guid?>(
+                candidates.Count > 0 ? candidates.Dequeue() : null);
+        };
+        harness.Service.ProcessCandidateOverride = (_, ct) => blocker.Task.WaitAsync(ct);
+
+        Assert.False(harness.HealthSchedule.BeginManualRun());
+        await harness.Service.RefillWorkerSlotsAsync(CancellationToken.None);
+
+        Assert.True(observedAdmission?.ChecksOpen);
+        Assert.False(observedAdmission?.RepairsOpen);
+        Assert.True(harness.HealthSchedule.IsManualRunActive);
+        blocker.TrySetResult();
+        await ReapUntilAsync(
+            harness.Service,
+            () => harness.Service.InProgressHealthCheckIds.Count == 0);
+
+        var outcome = await harness.Service.RefillWorkerSlotsAsync(CancellationToken.None);
+
+        Assert.Equal(HealthCheckRefillOutcome.NoCandidate, outcome);
+        Assert.False(harness.HealthSchedule.IsManualRunActive);
     }
 
     [Fact]
@@ -492,9 +546,9 @@ public sealed class HealthCheckCoordinatorTests
     }
 
     [Fact]
-    public async Task ProductionSelection_PreservesOrderingAndExcludesUrgentDuringQueueActivity()
+    public async Task ProductionSelection_PreservesOrderingAndScheduleAdmission()
     {
-        using var harness = new Harness(workers: 3, fullySplit: true);
+        using var harness = new Harness(workers: 5, fullySplit: true);
         var databasePath = Path.Join(
             Path.GetTempPath(),
             $"infinidysk-health-selection-{Guid.NewGuid():N}.sqlite");
@@ -502,7 +556,12 @@ public sealed class HealthCheckCoordinatorTests
             .UseSqlite($"Data Source={databasePath}")
             .Options;
         var urgent = NewCandidate("urgent.mkv", DateTimeOffset.UnixEpoch);
+        var pendingRepair = NewCandidate(
+            "pending-repair.mkv",
+            DateTimeOffset.UtcNow + TimeSpan.FromDays(1));
+        pendingRepair.HealthRepairPending = true;
         var neverChecked = NewCandidate("never-checked.mkv", null);
+        var forced = NewCandidate("forced.mkv", HealthCheckService.ForcedRecheckSentinel);
         var scheduled = NewCandidate("scheduled.mkv", DateTimeOffset.UtcNow - TimeSpan.FromHours(1));
         var nonMedia = NewCandidate("notes.nfo", null);
         try
@@ -510,18 +569,41 @@ public sealed class HealthCheckCoordinatorTests
             await using (var db = new DavDatabaseContext(options))
             {
                 await db.Database.EnsureCreatedAsync();
-                db.Items.AddRange(urgent, neverChecked, scheduled, nonMedia);
+                db.Items.AddRange(
+                    urgent,
+                    pendingRepair,
+                    neverChecked,
+                    forced,
+                    scheduled,
+                    nonMedia);
                 await db.SaveChangesAsync();
             }
             harness.Service.CreateDbContextOverride = () => new DavDatabaseContext(options);
 
-            var idleSelection = await harness.Service.SelectNextHealthCheckIdsAsync(
-                [], allowUrgentRepair: true, maximumCount: 3, CancellationToken.None);
-            var queueActiveSelection = await harness.Service.SelectNextHealthCheckIdsAsync(
-                [neverChecked.Id], allowUrgentRepair: false, maximumCount: 3, CancellationToken.None);
+            var unrestricted = await harness.Service.SelectNextHealthCheckIdsAsync(
+                [],
+                allowChecks: true,
+                allowRepairs: true,
+                maximumCount: 5,
+                CancellationToken.None);
+            var checksOnly = await harness.Service.SelectNextHealthCheckIdsAsync(
+                [],
+                allowChecks: true,
+                allowRepairs: false,
+                maximumCount: 5,
+                CancellationToken.None);
+            var repairsOnly = await harness.Service.SelectNextHealthCheckIdsAsync(
+                [],
+                allowChecks: false,
+                allowRepairs: true,
+                maximumCount: 5,
+                CancellationToken.None);
 
-            Assert.Equal([urgent.Id, neverChecked.Id, scheduled.Id], idleSelection);
-            Assert.Equal([scheduled.Id], queueActiveSelection);
+            Assert.Equal(
+                [urgent.Id, pendingRepair.Id, neverChecked.Id, forced.Id, scheduled.Id],
+                unrestricted);
+            Assert.Equal([neverChecked.Id, forced.Id, scheduled.Id], checksOnly);
+            Assert.Equal([urgent.Id, pendingRepair.Id], repairsOnly);
         }
         finally
         {
@@ -635,6 +717,7 @@ public sealed class HealthCheckCoordinatorTests
         public ConfigManager Config { get; }
         public HealthCheckService Service { get; }
         public BenchmarkGate BenchmarkGate { get; }
+        public HealthWorkSchedulePolicy HealthSchedule { get; }
         public HealthCheckConnectionGate ConnectionGate => _gate;
         public ControllableTimeProvider TimeProvider { get; } =
             new(DateTimeOffset.UtcNow);
@@ -694,6 +777,7 @@ public sealed class HealthCheckCoordinatorTests
                 });
             }
             Config.UpdateValues(values);
+            HealthSchedule = new HealthWorkSchedulePolicy(Config);
 
             WebsocketManager = new WebsocketManager();
             _patchStore = new RepairPatchStore(Path.Join(_root, "patches"), 1024 * 1024);
@@ -729,7 +813,8 @@ public sealed class HealthCheckCoordinatorTests
                 _patchStore,
                 new ArrReplacementSearchBudget(),
                 _gate,
-                timeProvider: TimeProvider);
+                timeProvider: TimeProvider,
+                healthWorkSchedule: HealthSchedule);
         }
 
         public void SetWorkers(int count)
@@ -750,6 +835,37 @@ public sealed class HealthCheckCoordinatorTests
                 {
                     ConfigName = ConfigKeys.RepairEnable,
                     ConfigValue = enabled.ToString(),
+                },
+            ]);
+        }
+
+        public void CloseHealthSchedules()
+        {
+            var localNow = TimeZoneInfo.ConvertTime(TimeProvider.GetUtcNow(), TimeZoneInfo.Local);
+            var closedDay = ((int)localNow.DayOfWeek + 1) % 7;
+            var closedSchedule = JsonSerializer.Serialize(new WeeklyWindowSchedule
+            {
+                Enabled = true,
+                Windows =
+                [
+                    new WeeklyWindow
+                    {
+                        Days = [closedDay],
+                        StartMinute = 0,
+                        EndMinute = 1,
+                    },
+                ],
+            });
+            Config.UpdateValues([
+                new ConfigItem
+                {
+                    ConfigName = ConfigKeys.RepairHealthcheckSchedule,
+                    ConfigValue = closedSchedule,
+                },
+                new ConfigItem
+                {
+                    ConfigName = ConfigKeys.RepairActionSchedule,
+                    ConfigValue = closedSchedule,
                 },
             ]);
         }

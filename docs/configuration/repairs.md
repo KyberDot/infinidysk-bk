@@ -23,7 +23,15 @@ Background health monitoring, PAR2 reconstruction, and replacement of unhealthy 
 | Max consecutive missing segments | `repair.degraded-max-consecutive-missing` | `2` | Longest tolerable run of adjacent holes (1–2) |
 | Max total missing segments | `repair.degraded-max-total-missing` | `5` | Total tolerable holes per file (1–1000) |
 | Max missing data (% of file) | `repair.degraded-max-missing-byte-percent` | `1.0` | Tolerable hole share of file bytes (0.01–50) |
+| Health-check schedule [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since } | `repair.healthcheck-schedule` | empty (always on) | JSON weekly windows for **new** routine health checks |
+| Repair quiet hours [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since } | `repair.action-schedule` | empty (always on) | JSON weekly windows for starting repairs |
 | Library Directory | `media.library-dir` | empty | Organized library root in the container — parent of your Arr root folders. Never the rclone mount or `/completed-symlinks` |
+
+## Health-check and repair windows [since 1.3.0](https://github.com/infinidysk/infinidysk/releases/tag/v1.3.0){ .nzbdav-since }
+
+Same JSON shape as [download schedule](queue.md#download-schedule-since-130): `{ "Enabled": true, "Windows": [{ "Days": [1,2,3,4,5], "StartMinute": 0, "EndMinute": 420 }] }`. Empty or disabled is unrestricted. Times use the host local timezone (container `TZ`).
+
+Work already in progress finishes if a window closes. Closed health-check windows still admit urgent and already-deferred repairs. Closed repair windows defer confirmed damage until the next open repair window instead of reconstructing or replacing immediately. **Run all checks now** on the Health page opens checks (not repairs) until the due queue is empty, then the schedule resumes. Playback is never gated.
 
 ## Parallel health checks
 

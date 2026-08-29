@@ -13,6 +13,7 @@ const BACKEND_PATH_PREFIXES = [
 const READ_ONLY_DENIED_POST_PATHS = new Set([
   "/api/delete-webdav-item",
   "/api/remove-missing-payloads",
+  "/api/trigger-health-check",
 ]);
 
 /** Decode a path; return null on malformed percent-encoding instead of throwing. */
@@ -46,7 +47,8 @@ export function isReadOnlyDeniedBackendMutation(method: string, pathname: string
   const normalizedPath = decodedPath.length > 1 ? decodedPath.replace(/\/+$/, "") : decodedPath;
   return (
     READ_ONLY_DENIED_POST_PATHS.has(normalizedPath) ||
-    normalizedPath.startsWith("/api/delete-webdav-item/")
+    normalizedPath.startsWith("/api/delete-webdav-item/") ||
+    normalizedPath.startsWith("/api/trigger-health-check/")
   );
 }
 

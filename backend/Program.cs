@@ -18,6 +18,7 @@ using NzbWebDAV.Auth;
 using NzbWebDAV.Clients.Rclone;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Config;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
@@ -402,6 +403,9 @@ public partial class Program
                 .AddHostedService(sp => sp.GetRequiredService<BandwidthLimitBroadcaster>())
                 .AddSingleton<ArrReplacementSearchBudget>()
                 .AddSingleton<NzbWebDAV.Clients.RadarrSonarr.ArrInstanceBackoff>()
+                .AddSingleton<HealthWorkSchedulePolicy>()
+                .AddSingleton<HealthScheduleBroadcaster>()
+                .AddHostedService(sp => sp.GetRequiredService<HealthScheduleBroadcaster>())
                 .AddSingleton<HealthCheckService>()
                 .AddSingleton<IHealthCheckQuiescence>(
                     sp => sp.GetRequiredService<HealthCheckService>())

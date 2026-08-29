@@ -7,6 +7,10 @@ import {
 } from "~/components/ui";
 import { Input, Select, Toggle } from "~/components/ui/form";
 import { type Dispatch, type SetStateAction } from "react";
+import {
+  WeeklyWindowEditor,
+  isWeeklyWindowScheduleJsonValid,
+} from "~/components/weekly-window-editor/weekly-window-editor";
 import { isPositiveInteger, isPositiveNumber } from "../validation";
 
 type RepairsSettingsProps = {
@@ -633,6 +637,37 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
             </div>
           </ManagedSetting>
         </SettingsCard>
+
+        <SettingsCard
+          icon="schedule"
+          title="Health-check and repair windows"
+          description="Optionally limit when new health checks or repairs may start. In-flight work finishes if a window closes."
+        >
+          <ManagedSetting configKey="repair.healthcheck-schedule">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-base-content">Health-check schedule</p>
+              <WeeklyWindowEditor
+                id="repair-healthcheck-schedule"
+                value={config["repair.healthcheck-schedule"] ?? ""}
+                onChange={(next) =>
+                  setNewConfig({ ...config, "repair.healthcheck-schedule": next })
+                }
+                description="When closed, InfiniDysk still admits urgent and already-deferred repairs. Use Run all checks now on the Health page to scan outside the window."
+              />
+            </div>
+          </ManagedSetting>
+          <ManagedSetting configKey="repair.action-schedule">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-base-content">Repair quiet hours</p>
+              <WeeklyWindowEditor
+                id="repair-action-schedule"
+                value={config["repair.action-schedule"] ?? ""}
+                onChange={(next) => setNewConfig({ ...config, "repair.action-schedule": next })}
+                description="When closed, confirmed damage is deferred until the next repair window instead of replacing or reconstructing immediately."
+              />
+            </div>
+          </ManagedSetting>
+        </SettingsCard>
       </div>
     </SettingsPage>
   );
@@ -670,7 +705,9 @@ export function isRepairsSettingsUpdated(
       newConfig["repair.degraded-max-total-missing"] ||
     config["repair.degraded-max-missing-byte-percent"] !==
       newConfig["repair.degraded-max-missing-byte-percent"] ||
-    config["media.library-dir"] !== newConfig["media.library-dir"]
+    config["media.library-dir"] !== newConfig["media.library-dir"] ||
+    config["repair.healthcheck-schedule"] !== newConfig["repair.healthcheck-schedule"] ||
+    config["repair.action-schedule"] !== newConfig["repair.action-schedule"]
   );
 }
 
@@ -706,5 +743,14 @@ export function isRepairsSettingsValid(newConfig: Record<string, string>) {
     const value = newConfig[key];
     return value === undefined || value === "" || isPositiveInteger(value);
   });
-  return concurrencyOk && workersOk && autoRemoveOk && bytePercentOk && par2Ok && degradedOk;
+  return (
+    concurrencyOk &&
+    workersOk &&
+    autoRemoveOk &&
+    bytePercentOk &&
+    par2Ok &&
+    degradedOk &&
+    isWeeklyWindowScheduleJsonValid(newConfig["repair.healthcheck-schedule"]) &&
+    isWeeklyWindowScheduleJsonValid(newConfig["repair.action-schedule"])
+  );
 }

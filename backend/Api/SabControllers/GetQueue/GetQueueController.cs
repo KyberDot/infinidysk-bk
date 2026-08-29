@@ -135,11 +135,13 @@ public class GetQueueController(
             var pct = Math.Clamp(x.ProgressPercentage, 0, 100);
             return (100 - pct) / 100.0 * x.QueueItem.TotalSegmentBytes;
         });
+        var queueStatusNow = DateTimeOffset.UtcNow;
         return new GetQueueResponse()
         {
             Queue = new GetQueueResponse.QueueObject()
             {
-                Paused = Config.IsSabQueuePaused(),
+                Paused = Config.IsQueueEffectivelyPaused(queueStatusNow),
+                PauseInt = Config.GetQueuePauseInt(queueStatusNow),
                 Slots = slots,
                 TotalCount = totalCount,
                 SpeedLimit = speedLimitKbps.ToString(),

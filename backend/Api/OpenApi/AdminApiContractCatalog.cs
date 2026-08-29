@@ -22,6 +22,7 @@ public static class AdminApiContractCatalog
         new("POST", "/api/get-config", "post-api-get-config"),
         new("POST", "/api/update-config", "post-api-update-config"),
         new("GET", "/api/get-health-check-queue", "get-api-get-health-check-queue"),
+        new("POST", "/api/trigger-health-check", "post-api-trigger-health-check"),
         new("GET", "/api/get-watchdog-entries", "get-api-get-watchdog-entries"),
         new("GET", "/api/exclude-sync", "get-api-exclude-sync"),
         new("POST", "/api/exclude-sync", "post-api-exclude-sync"),

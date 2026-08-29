@@ -61,12 +61,16 @@ describe("isReadOnlyDeniedBackendMutation", () => {
     "/api/remove-missing-payloads/",
     "/api/remove-missing-payloads%2F",
     "/%61pi/remove-missing-payloads",
+    "/api/trigger-health-check",
+    "/api/trigger-health-check/run",
+    "/api/trigger-health-check%2Frun",
   ])("blocks read-only POST access to %s", (path) => {
     expect(isReadOnlyDeniedBackendMutation("POST", path)).toBe(true);
   });
 
   it.each([
     ["GET", "/api/remove-missing-payloads"],
+    ["GET", "/api/trigger-health-check"],
     ["POST", "/api/remove-missing-payloads/dry-run"],
     ["POST", "/api/remove-missing-payloads/audit"],
     ["POST", "/api/remove-unlinked-files"],

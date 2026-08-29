@@ -110,6 +110,11 @@ namespace NzbWebDAV.Database.Migrations
                     b.Property<string>("GeneratedSymlinkTarget")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("HealthRepairPending")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(false);
+
                     b.Property<Guid?>("HistoryItemId")
                         .HasColumnType("TEXT");
 
@@ -164,6 +169,8 @@ namespace NzbWebDAV.Database.Migrations
                     b.HasIndex("HistoryItemId", "Type", "CreatedAt");
 
                     b.HasIndex("Type", "HistoryItemId", "NextHealthCheck", "ReleaseDate", "Id");
+
+                    b.HasIndex("HealthRepairPending", "NextHealthCheck");
 
                     b.ToTable("DavItems", (string)null);
                 });

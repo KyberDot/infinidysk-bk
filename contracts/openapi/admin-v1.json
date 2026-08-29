@@ -267,6 +267,30 @@
           "fileName"
         ],
         "type": "object"
+      },
+      "TriggerHealthCheckResponse": {
+        "description": "Accepted response for POST /api/trigger-health-check.",
+        "properties": {
+          "alreadyRunning": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "queuedCount": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "status": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "alreadyRunning",
+          "queuedCount",
+          "status"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -8823,6 +8847,87 @@
         ]
       }
     },
+    "/api/trigger-health-check": {
+      "post": {
+        "operationId": "post-api-trigger-health-check",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerHealthCheckResponse"
+                }
+              }
+            },
+            "description": "Accepted. The health-check run was queued."
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Bad request."
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Unauthorized."
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Forbidden."
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Not found."
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Conflict."
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Unexpected server error. Detail is sanitized; use traceId."
+          }
+        },
+        "summary": "Trigger Health Check",
+        "tags": [
+          "TriggerHealthCheck"
+        ]
+      }
+    },
     "/api/update-config": {
       "post": {
         "operationId": "post-api-update-config",
@@ -10310,6 +10415,9 @@
     },
     {
       "name": "UpdateConfig"
+    },
+    {
+      "name": "TriggerHealthCheck"
     },
     {
       "name": "TestUsenetConnection"

@@ -1,9 +1,11 @@
-﻿using System.Globalization;
+﻿using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Config.Scheduling;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
@@ -16,6 +18,8 @@ namespace NzbWebDAV.Config;
 public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
 {
     public static readonly string AppVersion = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_VERSION") ?? "0.0.0";
+
+    private readonly ConcurrentDictionary<string, string> _invalidScheduleWarnings = new();
 
     /// <summary>
     /// New config keys that inherit persisted or env values from a legacy name when unset.
@@ -550,6 +554,12 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
                 case ConfigKeys.ProwlarrSyncStatus:
                     RequireJson<ProwlarrSyncStatus>(item.ConfigName, value, jsonOptions);
                     break;
+
+                case ConfigKeys.QueueProcessingSchedule:
+                case ConfigKeys.RepairHealthcheckSchedule:
+                case ConfigKeys.RepairActionSchedule:
+                    RequireWeeklyWindowSchedule(item.ConfigName, value, jsonOptions);
+                    break;
             }
         }
 
@@ -932,6 +942,100 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     }
 
     /// <summary>
+    /// Manual SAB pause or a closed download window. Scheduler never writes
+    /// <see cref="ConfigKeys.QueuePaused"/>.
+    /// </summary>
+    public bool IsQueueEffectivelyPaused(DateTimeOffset? utcNow = null) =>
+        IsSabQueuePaused() || !IsQueueProcessingOpen(utcNow);
+
+    public bool IsQueueProcessingOpen(DateTimeOffset? utcNow = null)
+    {
+        var evaluation = WeeklyWindowEvaluator.Evaluate(
+            GetQueueProcessingSchedule(), utcNow ?? DateTimeOffset.UtcNow, TimeZoneInfo.Local);
+        return evaluation.IsOpen;
+    }
+
+    /// <summary>
+    /// Whole seconds until the download window reopens. Zero when a manual SAB
+    /// pause is the blocker, or when processing is unrestricted / currently open.
+    /// </summary>
+    public string GetQueuePauseInt(DateTimeOffset? utcNow = null)
+    {
+        if (IsSabQueuePaused()) return "0";
+        var now = utcNow ?? DateTimeOffset.UtcNow;
+        var evaluation = WeeklyWindowEvaluator.Evaluate(
+            GetQueueProcessingSchedule(), now, TimeZoneInfo.Local);
+        if (evaluation.IsOpen || evaluation.NextChange is not { } next)
+            return "0";
+        var seconds = Math.Max(0, (int)Math.Ceiling((next - now).TotalSeconds));
+        return seconds.ToString(CultureInfo.InvariantCulture);
+    }
+
+    public WeeklyWindowSchedule GetQueueProcessingSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.QueueProcessingSchedule);
+
+    public WeeklyWindowSchedule GetRepairHealthcheckSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.RepairHealthcheckSchedule);
+
+    public WeeklyWindowSchedule GetRepairActionSchedule() =>
+        ReadWeeklyWindowSchedule(ConfigKeys.RepairActionSchedule);
+
+    private WeeklyWindowSchedule ReadWeeklyWindowSchedule(string key)
+    {
+        var raw = StringUtil.EmptyToNull(GetConfigValue(key));
+        if (raw is null) return WeeklyWindowSchedule.Unrestricted;
+        if (WeeklyWindowSchedule.TryParse(raw, out var schedule, out var error))
+        {
+            _invalidScheduleWarnings.TryRemove(key, out _);
+            return schedule;
+        }
+        if (TryMarkInvalidScheduleWarning(key, raw))
+            Log.Warning("Ignoring invalid {ConfigKey} schedule. Reason: {Reason}", key, error);
+        return WeeklyWindowSchedule.Unrestricted;
+    }
+
+    /// <summary>
+    /// Returns true only for the caller that installs a new raw value, so concurrent
+    /// status polls do not repeat the same invalid-schedule warning.
+    /// </summary>
+    private bool TryMarkInvalidScheduleWarning(string key, string raw)
+    {
+        while (true)
+        {
+            if (_invalidScheduleWarnings.TryAdd(key, raw))
+                return true;
+
+            if (!_invalidScheduleWarnings.TryGetValue(key, out var lastRaw))
+                continue;
+
+            if (lastRaw == raw)
+                return false;
+
+            if (_invalidScheduleWarnings.TryUpdate(key, raw, lastRaw))
+                return true;
+        }
+    }
+
+    private static void RequireWeeklyWindowSchedule(string key, string value, JsonSerializerOptions? options)
+    {
+        WeeklyWindowSchedule? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<WeeklyWindowSchedule>(
+                value, options ?? WeeklyWindowSchedule.ParseOptions);
+        }
+        catch (JsonException e)
+        {
+            throw new ArgumentException($"Config value for '{key}' is not valid JSON: {e.Message}");
+        }
+
+        if (parsed is null)
+            throw new ArgumentException($"Config value for '{key}' is not valid JSON.");
+        if (!WeeklyWindowSchedule.TryValidate(parsed, out var error))
+            throw new ArgumentException($"Config value for '{key}' is invalid: {error}");
+    }
+
+    /// <summary>
     /// SAB-compatible speed limit in KB/s set via <c>mode=speedlimit</c>. 0 means
     /// unlimited. Accepted and stored for Arr/API compatibility; live Usenet
     /// payload throttling uses <see cref="GetUsenetBandwidthLimitBytesPerSecond"/>.
@@ -1045,6 +1149,8 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     /// <summary>
     /// Process-wide Usenet payload ingress cap in bytes/second. Missing, blank, or
     /// 0 means unlimited. 1 Mbit/s = 125,000 bytes/s. Values above 100 Gbit/s are capped.
+    /// Positive values below 1 byte/s round up to 1 byte/s so a configured limit
+    /// never degrades into unlimited throughput.
     /// </summary>
     public long GetUsenetBandwidthLimitBytesPerSecond()
     {

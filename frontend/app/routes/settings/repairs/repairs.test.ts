@@ -23,6 +23,8 @@ const baseConfig: Record<string, string> = {
   "repair.degraded-max-total-missing": "5",
   "repair.degraded-max-missing-byte-percent": "1.0",
   "media.library-dir": "/library",
+  "repair.healthcheck-schedule": "",
+  "repair.action-schedule": "",
   "arr.instances": JSON.stringify({ RadarrInstances: [{}], SonarrInstances: [] }),
 };
 
@@ -190,6 +192,15 @@ describe("Repairs settings helpers", () => {
       isRepairsSettingsValid({
         ...baseConfig,
         "repair.degraded-max-missing-byte-percent": "0",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects invalid health-check schedules", () => {
+    expect(
+      isRepairsSettingsValid({
+        ...baseConfig,
+        "repair.healthcheck-schedule": '{"Enabled":true,"Windows":[]}',
       }),
     ).toBe(false);
   });

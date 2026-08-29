@@ -61,6 +61,20 @@ internal sealed class AdminOpenApiDocumentTransformer : IOpenApiDocumentTransfor
             Required = new HashSet<string> { "type", "title", "status", "detail", "traceId" },
         };
 
+        document.Components.Schemas["TriggerHealthCheckResponse"] = new OpenApiSchema
+        {
+            Type = JsonSchemaType.Object,
+            Description = "Accepted response for POST /api/trigger-health-check.",
+            Properties = new Dictionary<string, IOpenApiSchema>
+            {
+                ["status"] = new OpenApiSchema { Type = JsonSchemaType.Boolean },
+                ["error"] = new OpenApiSchema { Type = JsonSchemaType.String },
+                ["queuedCount"] = new OpenApiSchema { Type = JsonSchemaType.Integer, Format = "int32" },
+                ["alreadyRunning"] = new OpenApiSchema { Type = JsonSchemaType.Boolean },
+            },
+            Required = new HashSet<string> { "status", "queuedCount", "alreadyRunning" },
+        };
+
         document.Security ??= [];
         document.Security.Add(new OpenApiSecurityRequirement
         {

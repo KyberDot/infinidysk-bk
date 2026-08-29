@@ -8,6 +8,10 @@ import {
   SettingsPage,
 } from "~/components/ui";
 import { className } from "~/utils/styling";
+import {
+  WeeklyWindowEditor,
+  isWeeklyWindowScheduleJsonValid,
+} from "~/components/weekly-window-editor/weekly-window-editor";
 import { isPositiveInteger } from "../validation";
 
 type QueueSettingsProps = {
@@ -178,6 +182,22 @@ export function QueueSettings({ config, setNewConfig }: QueueSettingsProps) {
             </div>
           </ManagedSetting>
         </SettingsCard>
+
+        <SettingsCard
+          icon="schedule"
+          title="Download schedule"
+          description="Optionally limit when new queue downloads may start. Active imports finish if a window closes."
+          className="lg:col-span-2"
+        >
+          <ManagedSetting configKey="queue.processing-schedule">
+            <WeeklyWindowEditor
+              id="queue-processing-schedule"
+              value={config["queue.processing-schedule"] ?? ""}
+              onChange={(next) => setNewConfig({ ...config, "queue.processing-schedule": next })}
+              description="Does not write the SAB pause flag. Manual pause/resume still works independently."
+            />
+          </ManagedSetting>
+        </SettingsCard>
       </div>
     </SettingsPage>
   );
@@ -191,7 +211,8 @@ export function isQueueSettingsUpdated(
     config["queue.worker-count"] !== newConfig["queue.worker-count"] ||
     config["usenet.max-queue-connections"] !== newConfig["usenet.max-queue-connections"] ||
     config["queue.max-items"] !== newConfig["queue.max-items"] ||
-    config["queue.resume-threshold"] !== newConfig["queue.resume-threshold"]
+    config["queue.resume-threshold"] !== newConfig["queue.resume-threshold"] ||
+    config["queue.processing-schedule"] !== newConfig["queue.processing-schedule"]
   );
 }
 
@@ -199,7 +220,8 @@ export function isQueueSettingsValid(config: Record<string, string>): boolean {
   return (
     isValidQueueWorkerCount(config["queue.worker-count"]) &&
     isValidMaxQueueConnections(config["usenet.max-queue-connections"]) &&
-    isValidQueueAdmission(config)
+    isValidQueueAdmission(config) &&
+    isWeeklyWindowScheduleJsonValid(config["queue.processing-schedule"])
   );
 }
 
