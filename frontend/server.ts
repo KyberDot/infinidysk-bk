@@ -3,6 +3,10 @@ import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
 import { shouldCompressResponse } from "./server/compression-filter.js";
+import {
+  attachHttpServerLifecycle,
+  attachWebsocketServerErrorListener,
+} from "./server/http-server-lifecycle.js";
 import { logger, requestLogger } from "./server/logger.js";
 import { securityHeadersMiddleware } from "./server/security-headers.js";
 import { websocketUpgradeGuard } from "./server/websocket-upgrade-guard.js";
@@ -159,6 +163,7 @@ function prepareServerModule(serverModule: ServerBuildModule): void {
 }
 
 // Handle development vs production
+let closeDevelopmentServer: (() => Promise<void>) | null = null;
 if (DEVELOPMENT) {
   logger.info("Starting frontend development server");
   const viteDevServer = await import("vite").then((vite) =>
@@ -166,6 +171,7 @@ if (DEVELOPMENT) {
       server: { middlewareMode: true },
     }),
   );
+  closeDevelopmentServer = () => Promise.resolve(viteDevServer.close());
   // Vite's dev middlewares handle their own `base` prefix, so they stay on the
   // root app; only the SSR module goes on the URL_BASE-mounted router.
   app.use(viteDevServer.middlewares);
@@ -205,14 +211,69 @@ if (URL_BASE) {
 
 // Create both the http and websocket servers
 const server = http.createServer(app);
+let websocketServer: WebSocketServer | null = null;
+
+const disposeStartupResources = async () => {
+  const operations: Promise<unknown>[] = [];
+  const closingWebsocket = websocketServer;
+  if (closingWebsocket) {
+    operations.push(
+      new Promise<void>((resolve) => {
+        closingWebsocket.close(() => resolve());
+      }),
+    );
+  }
+  if (closeDevelopmentServer) operations.push(closeDevelopmentServer());
+  await Promise.allSettled(operations);
+};
+
+const httpLifecycle = attachHttpServerLifecycle(server, {
+  configuredPort: PORT,
+  logError: (message, detail) => {
+    if (detail) logger.error(message, detail);
+    else logger.error(message);
+  },
+  onListening: () => {
+    if (websocketServer == null) return;
+    setWebsocketServer(websocketServer);
+    logger.info(`Frontend server listening on http://localhost:${PORT}${URL_BASE}`);
+  },
+  disposeStartupResources: async () => {
+    await disposeStartupResources();
+    // Vite close leaves watcher handles in middleware mode, so drain alone
+    // cannot terminate. Exit after cleanup so supervisors see status 1.
+    process.exit(1);
+  },
+  markFatal: (exitCode, fatalPhase) => {
+    process.exitCode = exitCode;
+    if (fatalPhase === "runtime") {
+      process.exit(exitCode);
+    }
+  },
+});
+
 // Allow long-lived proxied API calls (Usenet speed tests can run for many
 // minutes on large data budgets). Node defaults are 5 minutes / 60s headers.
 const LONG_RUNNING_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000; // 3 hours
 server.requestTimeout = LONG_RUNNING_REQUEST_TIMEOUT_MS;
 server.headersTimeout = LONG_RUNNING_REQUEST_TIMEOUT_MS + 1000;
-setWebsocketServer(new WebSocketServer({ server, path: `${URL_BASE}/ws`, maxPayload: 64 * 1024 }));
 
-// Begin listening for connections
-server.listen(PORT, () => {
-  logger.info(`Frontend server listening on http://localhost:${PORT}${URL_BASE}`);
+websocketServer = new WebSocketServer({
+  server,
+  path: `${URL_BASE}/ws`,
+  maxPayload: 64 * 1024,
 });
+// Issue 1234 owns general browser WebSocketServer error handling. This listener
+// only suppresses HTTP errors already owned by attachHttpServerLifecycle; `ws`
+// forwards the same Error object on bind failure. Rebase 1234 onto this listener
+// rather than adding a second one.
+attachWebsocketServerErrorListener(websocketServer, {
+  isOwned: httpLifecycle.owns,
+  onUnexpectedError: (error) => {
+    logger.error("Unexpected frontend WebSocket server error", error);
+    process.exitCode = 1;
+    process.exit(1);
+  },
+});
+
+server.listen(PORT);
