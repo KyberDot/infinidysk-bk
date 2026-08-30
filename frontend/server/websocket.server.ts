@@ -3,6 +3,9 @@ import { Buffer } from "node:buffer";
 import { isAuthenticated } from "../app/auth/authentication.server";
 import type { IncomingMessage } from "http";
 import { logger } from "./logger";
+import { attachBrowserWebsocketErrorListener, reportBrowserSocketError } from "./websocket-policy";
+
+export { MAX_WEBSOCKET_PAYLOAD_BYTES } from "./websocket-policy";
 
 // ws types MessageEvent.data as any; decode explicitly.
 function messageEventDataToString(data: unknown): string {
@@ -13,7 +16,6 @@ function messageEventDataToString(data: unknown): string {
   return String(data);
 }
 
-export const MAX_WEBSOCKET_PAYLOAD_BYTES = 64 * 1024;
 export const MAX_TOPICS_PER_SOCKET = 100;
 export const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 30_000;
 export const MAX_CLIENT_BUFFERED_AMOUNT = 1024 * 1024;
@@ -124,7 +126,19 @@ export function nextBackendReconnectDelayMs(
   return Math.floor(random() * (exp + 1));
 }
 
-function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRuntimeOptions) {
+export type WebsocketServerDependencies = {
+  authenticate: typeof isAuthenticated;
+  startBackendClient: typeof initializeWebsocketClient;
+  reportBrowserSocketError: typeof reportBrowserSocketError;
+  registerBrowserSocketErrorListener: typeof attachBrowserWebsocketErrorListener;
+};
+
+export function initializeWebsocketServer(
+  wss: WebSocketServer,
+  runtime: WebsocketRuntimeOptions,
+  dependencies?: WebsocketServerDependencies,
+) {
+  const resolved = dependencies ?? defaultDependencies;
   // keep track of socket subscriptions
   const websockets = new Map<TrackedSocket, Record<string, TopicKind>>();
   const subscriptions = new Map<string, Set<TrackedSocket>>();
@@ -134,7 +148,7 @@ function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRunti
   // aggregate changes upstream to the backend so it can skip serialization
   // for topics with zero listeners.
   const upstreamSubscriptions = new UpstreamSubscriptionForwarder(subscriptions);
-  const backendRelay = initializeWebsocketClient(
+  const backendRelay = resolved.startBackendClient(
     subscriptions,
     lastMessage,
     upstreamSubscriptions,
@@ -165,7 +179,15 @@ function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRunti
     let authenticated = false;
     let closed = false;
     const remote = request.socket.remoteAddress ?? "unknown IP";
-    const pendingMessages: WebSocket.MessageEvent[] = [];
+    let pendingMessage: WebSocket.MessageEvent | null = null;
+    resolved.registerBrowserSocketErrorListener(
+      ws,
+      {
+        remote,
+        isAuthenticated: () => authenticated,
+      },
+      resolved.reportBrowserSocketError,
+    );
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
@@ -205,7 +227,7 @@ function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRunti
 
     ws.onmessage = (event: WebSocket.MessageEvent) => {
       if (!authenticated) {
-        pendingMessages.push(event);
+        pendingMessage = event;
         return;
       }
       applySubscription(event);
@@ -213,7 +235,7 @@ function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRunti
 
     ws.onclose = (event: WebSocket.CloseEvent) => {
       closed = true;
-      pendingMessages.length = 0;
+      pendingMessage = null;
       const topics = websockets.get(ws);
       if (topics) {
         websockets.delete(ws);
@@ -232,20 +254,23 @@ function initializeWebsocketServer(wss: WebSocketServer, runtime: WebsocketRunti
 
     void (async () => {
       try {
-        if (!(await isAuthenticated(request))) {
+        if (!(await resolved.authenticate(request))) {
           logger.warn(`Rejected unauthenticated websocket connection from ${remote}`);
-          ws.close(1008, "Unauthorized");
+          if (ws.readyState === WebSocket.OPEN) ws.close(1008, "Unauthorized");
           return;
         }
-        if (closed) return;
+        if (closed || ws.readyState !== WebSocket.OPEN) {
+          pendingMessage = null;
+          return;
+        }
         authenticated = true;
         logger.info(`Browser websocket connected from ${remote}`);
-        for (const event of pendingMessages.splice(0)) {
-          applySubscription(event);
-        }
+        const message = pendingMessage;
+        pendingMessage = null;
+        if (message) applySubscription(message);
       } catch (error) {
         logger.error("Error authenticating websocket session", error);
-        ws.close(1011, "Internal server error");
+        if (ws.readyState === WebSocket.OPEN) ws.close(1011, "Internal server error");
       }
     })();
   });
@@ -390,6 +415,13 @@ export function initializeWebsocketClient(
     },
   };
 }
+
+const defaultDependencies: WebsocketServerDependencies = {
+  authenticate: isAuthenticated,
+  startBackendClient: initializeWebsocketClient,
+  reportBrowserSocketError,
+  registerBrowserSocketErrorListener: attachBrowserWebsocketErrorListener,
+};
 
 /**
  * Forwards the aggregate set of browser-subscribed topics upstream to the backend
