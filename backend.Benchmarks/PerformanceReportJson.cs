@@ -64,6 +64,29 @@ internal static class PerformanceReportJson
             ["cpuSeconds"] = Round(cpuSeconds),
         };
 
+    public static Dictionary<string, double> WholePathTiming(
+        double wallSeconds,
+        double clientCpuSeconds,
+        double serverCpuSeconds,
+        double clientCpuSecondsPerGb,
+        double throughputMbps,
+        long clientAllocatedBytes,
+        int gen0Collections,
+        int gen1Collections,
+        int gen2Collections) =>
+        new(StringComparer.Ordinal)
+        {
+            ["wallSeconds"] = Round(wallSeconds),
+            ["clientCpuSeconds"] = Round(clientCpuSeconds),
+            ["serverCpuSeconds"] = Round(serverCpuSeconds),
+            ["clientCpuSecondsPerGb"] = Round(clientCpuSecondsPerGb),
+            ["throughputMbps"] = Round(throughputMbps),
+            ["clientAllocatedBytes"] = Round(clientAllocatedBytes),
+            ["gen0Collections"] = Round(gen0Collections),
+            ["gen1Collections"] = Round(gen1Collections),
+            ["gen2Collections"] = Round(gen2Collections),
+        };
+
     public static double Round(double value) =>
         Math.Round(value, 3, MidpointRounding.AwayFromZero);
 
