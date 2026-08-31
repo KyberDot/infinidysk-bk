@@ -1,4 +1,5 @@
 using System.Runtime.ExceptionServices;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using UsenetSharp.Models;
 using UsenetSharp.Streams;
 
@@ -78,7 +79,7 @@ internal static class LocalDataBatchOverlay
         {
             partition = Partition(segmentIds, tryOpenLocal, cancellationToken);
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception)
         {
             var cancelled = exception is OperationCanceledException &&
                             cancellationToken.IsCancellationRequested;
@@ -109,7 +110,7 @@ internal static class LocalDataBatchOverlay
         }
 
         var deferred = new DeferredArticleBodyCallback();
-        var abandonCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var abandonCts = ContextualCancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         UsenetDecodedBodyBatch? inner = null;
         var mismatchHandled = false;
         try
@@ -122,29 +123,56 @@ internal static class LocalDataBatchOverlay
                 .ConfigureAwait(false);
             if (inner.Responses.Count != partition.Misses.Count)
             {
-                await DrainMismatchedBatchAsync(inner, abandonCts).ConfigureAwait(false);
-                deferred.Discard();
-                DisposeHits(partition.Hits);
-                ArticleBodyCompletion.InvokeContained(
-                    outerCallback, ArticleBodyResult.NotRetrieved, "batch-response-count-mismatch");
                 mismatchHandled = true;
+                try
+                {
+                    await DecodedBodyBatchCleanup.AbandonAsync(inner, abandonCts).ConfigureAwait(false);
+                }
+                finally
+                {
+                    deferred.Discard();
+                    DisposeHits(partition.Hits);
+                    ArticleBodyCompletion.InvokeContained(
+                        outerCallback, ArticleBodyResult.NotRetrieved, "batch-response-count-mismatch");
+                }
+
                 throw new InvalidOperationException(
                     $"Pipelined BODY returned {inner.Responses.Count} responses for {partition.Misses.Count} requests.");
             }
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception)
         {
             if (!mismatchHandled)
             {
                 deferred.Discard();
-                DisposeHits(partition.Hits);
-                if (inner is not null)
-                    await ObserveCompletionAsync(inner.Completion).ConfigureAwait(false);
-                ArticleBodyCompletion.InvokeContained(
-                    outerCallback, ArticleBodyResult.NotRetrieved, "local-batch-setup");
+                var cancelled = exception is OperationCanceledException &&
+                                cancellationToken.IsCancellationRequested;
+                try
+                {
+                    try
+                    {
+                        DisposeHits(partition.Hits);
+                    }
+                    finally
+                    {
+                        if (inner is not null)
+                            await DecodedBodyBatchCleanup.AbandonAsync(inner, abandonCts)
+                                .ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    ArticleBodyCompletion.InvokeContained(
+                        outerCallback,
+                        cancelled ? ArticleBodyResult.Cancelled : ArticleBodyResult.NotRetrieved,
+                        cancelled ? null : "local-batch-setup");
+                    abandonCts.Dispose();
+                }
             }
-
-            abandonCts.Dispose();
+            else
+            {
+                abandonCts.Dispose();
+            }
             throw;
         }
 
@@ -267,7 +295,7 @@ internal static class LocalDataBatchOverlay
                 previousTerminal = terminal.Task;
                 state.ObserveResponse(response);
             }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
+            catch (Exception exception)
             {
                 state.ObserveFailure(exception);
                 output[index].TrySetException(exception);
@@ -284,55 +312,15 @@ internal static class LocalDataBatchOverlay
         {
             await previous.ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception)
         {
             // Predecessor already recorded and surfaced on its own response/stream path.
         }
     }
 
-    private static async Task DrainMismatchedBatchAsync(
-        UsenetDecodedBodyBatch inner,
-        CancellationTokenSource abandonCts)
-    {
-        try
-        {
-            await abandonCts.CancelAsync().ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
-        {
-            // Drain still has to run so the inner lifecycle can finish.
-        }
-
-        foreach (var responseTask in inner.Responses)
-        {
-            try
-            {
-                var response = await responseTask.ConfigureAwait(false);
-                if (response.Stream is not null)
-                    await response.Stream.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
-            {
-                // Continue so every supplied response and the inner completion are observed.
-            }
-        }
-
-        await ObserveCompletionAsync(inner.Completion).ConfigureAwait(false);
-    }
-
-    private static async Task ObserveCompletionAsync(Task completion)
-    {
-        try
-        {
-            await completion.ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
-        {
-            // Observed so the producer cannot become unobserved.
-        }
-    }
-
-    private static async Task CompleteThenDisposeAsync(Task completion, CancellationTokenSource abandonCts)
+    private static async Task CompleteThenDisposeAsync(
+        Task completion,
+        ContextualCancellationTokenSource abandonCts)
     {
         try
         {
@@ -346,17 +334,21 @@ internal static class LocalDataBatchOverlay
 
     private static void DisposeHits(IEnumerable<LocalBatchHit> hits)
     {
+        ExceptionDispatchInfo? fatal = null;
         foreach (var hit in hits)
         {
             try
             {
                 hit.Response.Stream?.Dispose();
             }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
+            catch (Exception exception)
             {
-                // Setup cleanup must continue for every already-opened local stream.
+                if (exception is OutOfMemoryException)
+                    fatal = BatchLifecycle.PreferFailure(fatal, exception);
             }
         }
+
+        fatal?.Throw();
     }
 }
 
@@ -418,12 +410,11 @@ internal sealed class BatchCompletionState
 
     public async Task CompleteAsync(Task publisher, Task innerCompletion)
     {
-        var publisherFailure = await ObserveAsync(publisher).ConfigureAwait(false);
-        var innerFailure = await ObserveAsync(innerCompletion).ConfigureAwait(false);
-        if (publisherFailure is not null)
-            ObserveFailure(publisherFailure);
-        if (innerFailure is not null)
-            ObserveFailure(innerFailure);
+        var publisherFailure = await BatchLifecycle.ObserveAsync(publisher).ConfigureAwait(false);
+        var innerFailure = await BatchLifecycle.ObserveAsync(innerCompletion).ConfigureAwait(false);
+        var observed = BatchLifecycle.Combine(publisherFailure, innerFailure);
+        if (observed is not null)
+            ObserveFailure(observed.SourceException);
 
         if (Volatile.Read(ref _inner) is null && _hasInnerBatch)
             RecordInner(ArticleBodyResult.NotRetrieved, "inner-callback-missing");
@@ -447,10 +438,10 @@ internal sealed class BatchCompletionState
         var inner = Volatile.Read(ref _inner);
         if (Volatile.Read(ref _firstFailure) is not null)
             return ArticleBodyResult.NotRetrieved;
-        if (Volatile.Read(ref _cancelled) != 0)
-            return ArticleBodyResult.Cancelled;
         if (_hasInnerBatch && inner?.Result == ArticleBodyResult.NotRetrieved)
             return ArticleBodyResult.NotRetrieved;
+        if (Volatile.Read(ref _cancelled) != 0)
+            return ArticleBodyResult.Cancelled;
         if (_hasInnerBatch && inner?.Result == ArticleBodyResult.Cancelled)
             return ArticleBodyResult.Cancelled;
         if (Volatile.Read(ref _notFound) != 0 ||
@@ -482,19 +473,6 @@ internal sealed class BatchCompletionState
         if (Interlocked.Exchange(ref _outerCallbackFired, 1) != 0)
             return;
         ArticleBodyCompletion.InvokeContained(_outer, result, reason);
-    }
-
-    private static async Task<Exception?> ObserveAsync(Task task)
-    {
-        try
-        {
-            await task.ConfigureAwait(false);
-            return null;
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
-        {
-            return exception;
-        }
     }
 
     private sealed record InnerCallback(ArticleBodyResult Result, string? Reason);
@@ -534,7 +512,7 @@ internal sealed class OrderedBatchYencStream : YencStream
                 Signal(null);
             return read;
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception)
         {
             Signal(exception);
             throw;
@@ -557,7 +535,7 @@ internal sealed class OrderedBatchYencStream : YencStream
         {
             _inner.Dispose();
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception)
         {
             failure = exception;
             throw;
@@ -583,7 +561,7 @@ internal sealed class OrderedBatchYencStream : YencStream
         {
             await _inner.DisposeAsync().ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception)
         {
             failure = exception;
             throw;
@@ -600,6 +578,9 @@ internal sealed class OrderedBatchYencStream : YencStream
         if (Interlocked.Exchange(ref _signaled, 1) != 0)
             return;
         _observeTerminal(failure);
-        _terminal.TrySetResult();
+        if (failure is null)
+            _terminal.TrySetResult();
+        else
+            _terminal.TrySetException(failure);
     }
 }

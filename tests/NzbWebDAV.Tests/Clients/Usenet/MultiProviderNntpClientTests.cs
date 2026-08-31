@@ -608,7 +608,14 @@ public class MultiProviderNntpClientTests
         var results = new List<PipelinedBodyResult>();
         await foreach (var result in client.DecodedBodiesPipelinedAsync(
                            segmentIds, depth, CancellationToken.None))
+        {
             results.Add(result);
+            // Later responses stay pending until the earlier stream is drained, matching
+            // UsenetDecodedBodyBatch's ordered-readiness contract.
+            if (result.Stream is not null)
+                await result.Stream.DisposeAsync();
+        }
+
         return results;
     }
 
@@ -1995,13 +2002,14 @@ public class MultiProviderNntpClientTests
 
             var firstTask = batch.Responses[0];
             var secondTask = batch.Responses[1];
-            Assert.True(firstTask.IsCompleted);
-            Assert.True(secondTask.IsCompleted);
-            first = await firstTask;
-            second = await secondTask;
+            first = await firstTask.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.False(secondTask.IsCompleted);
             Assert.Equal(UsenetResponseType.ArticleRetrievedBodyFollows, first.ResponseType);
-            Assert.Equal(UsenetResponseType.ArticleRetrievedBodyFollows, second.ResponseType);
             Assert.Equal("seg-0", first.SegmentId);
+            await first.Stream!.DisposeAsync();
+            first = first with { Stream = null };
+            second = await secondTask.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(UsenetResponseType.ArticleRetrievedBodyFollows, second.ResponseType);
             Assert.Equal("seg-1", second.SegmentId);
         }
         finally
@@ -2010,6 +2018,122 @@ public class MultiProviderNntpClientTests
             if (first?.Stream != null) await first.Stream.DisposeAsync();
             if (second?.Stream != null) await second.Stream.DisposeAsync();
         }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public async Task MalformedBatch_IsAbandonedBeforeRetryingNextProvider(int responseCount)
+    {
+        var first = new ControlledDecodedBodyBatchClient(
+            responseCountOverride: responseCount,
+            blockCompletionUntilStreamsDisposed: true);
+        var firstProvider = CreateProvider(first, host: "malformed.example", maxConnections: 1);
+        var secondStartedAvailable = -1;
+        var second = new ControlledDecodedBodyBatchClient
+        {
+            OnBatchStart = () => secondStartedAvailable = firstProvider.AvailableConnections,
+        };
+        var secondProvider = CreateProvider(second, host: "healthy.example", maxConnections: 1);
+        using var client = new MultiProviderNntpClient([firstProvider, secondProvider]);
+        using var caller = new CancellationTokenSource();
+        var recorder = new ArticleBodyCompletionRecorder();
+
+        var batch = await client.DecodedBodiesAsync(["a", "b"], recorder.Invoke, caller.Token);
+        await batch.DrainAsync();
+
+        Assert.Equal(1, first.OrdinaryBatchCount);
+        Assert.Equal(1, second.OrdinaryBatchCount);
+        Assert.Equal(1, secondStartedAvailable);
+        Assert.Equal(1, firstProvider.AvailableConnections);
+        Assert.True(first.LastCancellationToken.IsCancellationRequested);
+        Assert.False(caller.IsCancellationRequested);
+        Assert.Equal(responseCount, first.DisposedStreamCount);
+        Assert.True(first.ProducerCompletion.IsCompleted);
+        Assert.Equal(1, recorder.Count);
+        Assert.Equal(ArticleBodyResult.Retrieved, recorder.Result);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public async Task MalformedBatch_WithNoFallback_ReportsNotRetrievedOnce(int responseCount)
+    {
+        var inner = new ControlledDecodedBodyBatchClient(
+            responseCountOverride: responseCount,
+            blockCompletionUntilStreamsDisposed: true);
+        var provider = CreateProvider(inner, host: "solo.example", maxConnections: 1);
+        using var client = new MultiProviderNntpClient([provider]);
+        using var caller = new CancellationTokenSource();
+        var recorder = new ArticleBodyCompletionRecorder();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DecodedBodiesAsync(["a", "b"], recorder.Invoke, caller.Token));
+
+        Assert.Equal(1, inner.OrdinaryBatchCount);
+        Assert.Equal(1, provider.AvailableConnections);
+        Assert.True(inner.LastCancellationToken.IsCancellationRequested);
+        Assert.False(caller.IsCancellationRequested);
+        Assert.Equal(responseCount, inner.DisposedStreamCount);
+        Assert.True(inner.ProducerCompletion.IsCompleted);
+        Assert.Equal(1, recorder.Count);
+        Assert.Equal(ArticleBodyResult.NotRetrieved, recorder.Result);
+    }
+
+    [Fact]
+    public async Task BatchResponse_OomFaultsResponseAndBatchCompletion()
+    {
+        var connection = new ScriptedNntpClient
+        {
+            BatchResponseCode = 222,
+            FaultBatchResponsesWith = () => new OutOfMemoryException("batch-response"),
+        };
+        using var client = new MultiProviderNntpClient([CreateProvider(connection)]);
+
+        var batch = await client.DecodedBodiesAsync(
+            ["segment"], onConnectionReadyAgain: null, CancellationToken.None);
+
+        await Assert.ThrowsAsync<OutOfMemoryException>(() => batch.Responses[0]);
+        await Assert.ThrowsAsync<OutOfMemoryException>(() => batch.Completion);
+    }
+
+    [Fact]
+    public async Task OrderedBatchResponsePublisher_StreamOomFaultsPublisher()
+    {
+        var oom = new OutOfMemoryException("stream-read");
+        var raw = new Task<UsenetDecodedBodyResponse>[]
+        {
+            Task.FromResult(new UsenetDecodedBodyResponse
+            {
+                SegmentId = "first",
+                ResponseCode = 222,
+                ResponseMessage = "222",
+                Stream = new ThrowingOomYencStream(oom),
+            }),
+            Task.FromResult(new UsenetDecodedBodyResponse
+            {
+                SegmentId = "second",
+                ResponseCode = 222,
+                ResponseMessage = "222",
+                Stream = new YencStream(new MemoryStream([], writable: false)),
+            }),
+        };
+        var output = new[]
+        {
+            new TaskCompletionSource<UsenetDecodedBodyResponse>(
+                TaskCreationOptions.RunContinuationsAsynchronously),
+            new TaskCompletionSource<UsenetDecodedBodyResponse>(
+                TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+
+        var publisher = OrderedBatchResponsePublisher.PublishAsync(raw, output);
+        var first = await output[0].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<OutOfMemoryException>(
+            async () => await first.Stream!.ReadAsync(new byte[1]));
+        var second = await output[1].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await second.Stream!.DisposeAsync();
+
+        await Assert.ThrowsAsync<OutOfMemoryException>(() => publisher);
     }
 
     [Fact]
@@ -2047,9 +2171,13 @@ public class MultiProviderNntpClientTests
 
             Assert.False(batch.Completion.IsCompleted);
             backup.CompletePendingSingularRequests();
-            first = await batch.Responses[0];
-            second = await batch.Responses[1];
-            if (first.Stream is not null) await first.Stream.DisposeAsync();
+            first = await batch.Responses[0].WaitAsync(TimeSpan.FromSeconds(5));
+            if (first.Stream is not null)
+            {
+                await first.Stream.DisposeAsync();
+                first = first with { Stream = null };
+            }
+            second = await batch.Responses[1].WaitAsync(TimeSpan.FromSeconds(5));
             if (second.Stream is not null) await second.Stream.DisposeAsync();
             await batch.Completion.WaitAsync(TimeSpan.FromSeconds(5));
         }
@@ -2360,6 +2488,14 @@ public class MultiProviderNntpClientTests
         breaker.RecordFailure();
         breaker.RecordFailure();
         return breaker;
+    }
+
+    private sealed class ThrowingOomYencStream(OutOfMemoryException exception) : YencStream(Null)
+    {
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            throw exception;
     }
 
     internal sealed class ScriptedNntpClient : NntpClient
