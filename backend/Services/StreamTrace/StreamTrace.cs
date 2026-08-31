@@ -25,6 +25,14 @@ public static class StreamTrace
     public static void TryPrefetchWidth(Guid sessionId, int previousBatchSize, int batchSize)
         => _buffer?.PrefetchWidth(sessionId, previousBatchSize, batchSize);
 
+    internal static void TryStreamStartup(
+        Guid sessionId,
+        long? rangeGeneration,
+        string phase,
+        long? bytes = null,
+        TimeSpan? elapsed = null)
+        => _buffer?.StreamStartup(sessionId, rangeGeneration, phase, bytes, elapsed);
+
     public static void TryStall(StreamTraceRangeContext? range, StreamStallKind kind, TimeSpan elapsed)
         => _buffer?.AddStall(range, kind, elapsed);
 

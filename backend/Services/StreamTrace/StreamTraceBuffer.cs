@@ -434,6 +434,33 @@ public sealed class StreamTraceBuffer
     }
 
     /// <summary>
+    /// Bounded, range-attributed startup/handoff evidence. <paramref name="phase"/>
+    /// is produced only by the typed mapping in
+    /// <see cref="NzbWebDAV.Streams.StreamStartupTrace"/>.
+    /// </summary>
+    internal void StreamStartup(
+        Guid sessionId,
+        long? rangeGeneration,
+        string phase,
+        long? bytes,
+        TimeSpan? elapsed)
+    {
+        Record(new StreamTraceEvent
+        {
+            Sequence = 0,
+            AtUnixMs = Now(),
+            SessionId = sessionId,
+            Kind = StreamTraceKind.StreamStartup.ToString(),
+            Status = phase,
+            Bytes = bytes,
+            RangeGeneration = rangeGeneration,
+            DurationMs = elapsed is { } value
+                ? (int)Math.Clamp(value.TotalMilliseconds, 0, int.MaxValue)
+                : null,
+        });
+    }
+
+    /// <summary>
     /// Adds time spent blocked on <paramref name="kind"/> to the range identified by
     /// <paramref name="range"/>. Ticks are accumulated rather than milliseconds so
     /// the many sub-millisecond client writes in a range still add up. No-ops when

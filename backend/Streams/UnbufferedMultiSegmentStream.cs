@@ -15,6 +15,7 @@ namespace NzbWebDAV.Streams;
 public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
 {
     private const int MaxCorruptionRetries = 3;
+    private const int MaxTransportRetries = 2;
 
     private readonly Memory<string> _segmentIds;
     private readonly string[][]? _segmentFallbacks;
@@ -37,6 +38,11 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
     private bool _openSegmentHole;
     private bool _hasProbedByte;
     private byte _probedByte;
+    private long _positionPrefixBytes;
+    private long _positionPrefixRemaining;
+    private bool _isPositioning;
+    private long _openSegmentCallerBytes;
+    private SegmentRecoveryState? _recoveryState;
     private bool _disposed;
 
 
@@ -65,6 +71,53 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         _knownMissingSegmentIndices = knownMissingSegmentIndices;
     }
 
+    // Positioning is distinct from emission. If a candidate BODY is replaced
+    // before this segment returns a caller-visible byte, the full prefix is
+    // replayed against the replacement before any data escapes.
+    internal async Task DiscardPrefixBytesAsync(long prefixBytes, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(prefixBytes);
+        if (prefixBytes == 0)
+            return;
+
+        _positionPrefixBytes = prefixBytes;
+        _positionPrefixRemaining = prefixBytes;
+        await EnsurePositionedAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsurePositionedAsync(CancellationToken cancellationToken)
+    {
+        if (_positionPrefixRemaining == 0)
+            return;
+
+        _isPositioning = true;
+        var throwaway = ArrayPool<byte>.Shared.Rent(
+            (int)Math.Min(_positionPrefixRemaining, 64 * 1024));
+        try
+        {
+            while (_positionPrefixRemaining > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var toRead = (int)Math.Min(_positionPrefixRemaining, throwaway.Length);
+                var read = await ReadAsync(throwaway.AsMemory(0, toRead), cancellationToken)
+                    .ConfigureAwait(false);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException(
+                        $"Stream ended {_positionPrefixRemaining} bytes before " +
+                        $"{_positionPrefixBytes} bytes could be skipped.");
+                }
+
+                _positionPrefixRemaining -= read;
+            }
+        }
+        finally
+        {
+            _isPositioning = false;
+            ArrayPool<byte>.Shared.Return(throwaway);
+        }
+    }
+
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -72,6 +125,12 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (!_isPositioning && _positionPrefixRemaining > 0)
+            {
+                await EnsurePositionedAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
 
             if (_pendingPadBytes > 0)
             {
@@ -81,7 +140,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                 _openSegmentBytes += fill;
                 if (_pendingPadBytes == 0)
                     await FinishOpenSegmentAsync().ConfigureAwait(false);
-                return fill;
+                return ReturnToCaller(fill);
             }
 
             var written = 0;
@@ -98,7 +157,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                     _openSegmentBytes += 1;
                     written = 1;
                     if (written == buffer.Length)
-                        return written;
+                        return ReturnToCaller(written);
                 }
             }
 
@@ -106,12 +165,11 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             if (_stream == null)
             {
                 if (written > 0)
-                    return written;
+                    return ReturnToCaller(written);
                 if (_currentIndex >= _segmentIds.Length) return 0;
                 var segmentIndex = _currentIndex;
                 var segmentId = _segmentIds.Span[_currentIndex++];
-                _openSegmentIndex = -1;
-                _openSegmentBytes = 0;
+                BeginSegment(segmentIndex, segmentId);
                 if (_knownMissingSegmentIndices?.Contains(segmentIndex) == true)
                 {
                     await OpenKnownMissingSegmentAsync(segmentIndex, segmentId, cancellationToken)
@@ -131,41 +189,25 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                         .ConfigureAwait(false);
                     _stream = fetched;
                     fetched = null;
-                    _openSegmentIndex = segmentIndex;
                     _openSegmentFromLiveFetch = true;
                     _openSegmentHole = false;
                 }
                 catch (UsenetArticleNotFoundException e)
                 {
                     await DisposeBodyStreamAsync(fetched).ConfigureAwait(false);
-                    var fallback = await TryFallbackSegmentsAsync(segmentIndex, cancellationToken)
+                    await HandleMissingAsync(segmentIndex, segmentId, e, cancellationToken)
                         .ConfigureAwait(false);
-                    if (fallback is not null)
-                    {
-                        _stream = fallback;
-                        _openSegmentIndex = segmentIndex;
-                        _openSegmentFromLiveFetch = true;
-                        _openSegmentHole = false;
-                    }
-                    else
-                    {
-                        if (_failFastOnFirstSegment && segmentIndex == 0)
-                            throw;
-                        // Only an exactly-known length may stand in for missing data:
-                        // anything else shifts every following byte of the file.
-                        if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out _))
-                            throw CreateUnknownLengthFailure(segmentIndex, e);
-
-                        ApplyZeroFill(segmentIndex, e.SegmentId, fill, e, isCorruption: false);
-                    }
                 }
-                catch (UsenetCorruptArticleException e) when (
-                    !cancellationToken.IsCancellationRequested
-                    && _openSegmentBytes == 0
-                    && _pendingPadBytes == 0)
+                catch (UsenetCorruptArticleException e) when (!cancellationToken.IsCancellationRequested)
                 {
                     await DisposeBodyStreamAsync(fetched).ConfigureAwait(false);
-                    await HandlePreEmissionCorruptionAsync(segmentIndex, segmentId, e, cancellationToken)
+                    await HandleCorruptionAsync(segmentIndex, segmentId, e, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception e) when (IsRecoverableTransportFailure(e, cancellationToken))
+                {
+                    await DisposeBodyStreamAsync(fetched).ConfigureAwait(false);
+                    await HandleTransportFailureAsync(segmentIndex, segmentId, e, cancellationToken)
                         .ConfigureAwait(false);
                 }
 
@@ -178,16 +220,26 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             if (TryGetRemainingExactBytes(out var remainingExact) && remainingExact == 0)
             {
                 if (written > 0)
-                    return written;
+                    return ReturnToCaller(written);
                 try
                 {
                     await ObserveLiveSegmentTrailerAsync(cancellationToken).ConfigureAwait(false);
                 }
                 catch (UsenetCorruptArticleException e) when (!cancellationToken.IsCancellationRequested)
                 {
-                    await HandlePostEmissionCorruptionAsync(
+                    await HandleCorruptionAsync(
                             _openSegmentIndex, _segmentIds.Span[_openSegmentIndex], e, cancellationToken)
                         .ConfigureAwait(false);
+                    continue;
+                }
+                catch (Exception e) when (
+                    _openSegmentCallerBytes == 0 &&
+                    IsRecoverableTransportFailure(e, cancellationToken))
+                {
+                    await HandleTransportFailureAsync(
+                            _openSegmentIndex, _segmentIds.Span[_openSegmentIndex], e, cancellationToken)
+                        .ConfigureAwait(false);
+                    continue;
                 }
 
                 await FinishOpenSegmentAsync().ConfigureAwait(false);
@@ -205,28 +257,29 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             }
             catch (UsenetCorruptArticleException e) when (!cancellationToken.IsCancellationRequested)
             {
-                var openIndex = _openSegmentIndex;
-                var openId = _segmentIds.Span[openIndex];
-                if (_openSegmentBytes == 0 && _pendingPadBytes == 0)
-                {
-                    await HandlePreEmissionCorruptionAsync(openIndex, openId, e, cancellationToken)
-                        .ConfigureAwait(false);
-                    continue;
-                }
-
-                await HandlePostEmissionCorruptionAsync(openIndex, openId, e, cancellationToken)
+                await HandleCorruptionAsync(
+                        _openSegmentIndex, _segmentIds.Span[_openSegmentIndex], e, cancellationToken)
                     .ConfigureAwait(false);
-                throw;
+                continue;
+            }
+            catch (Exception e) when (
+                _openSegmentCallerBytes == 0 &&
+                IsRecoverableTransportFailure(e, cancellationToken))
+            {
+                await HandleTransportFailureAsync(
+                        _openSegmentIndex, _segmentIds.Span[_openSegmentIndex], e, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
             }
 
             if (read > 0)
             {
                 _openSegmentBytes += read;
-                return written + read;
+                return ReturnToCaller(written + read);
             }
 
             if (written > 0)
-                return written;
+                return ReturnToCaller(written);
 
             // Body ended early: pad to the recorded length so the next segment still
             // starts at the offset the rest of the file expects.
@@ -354,6 +407,19 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         return null;
     }
 
+    private void BeginSegment(int segmentIndex, string segmentId)
+    {
+        _openSegmentIndex = segmentIndex;
+        _openSegmentBytes = 0;
+        _openSegmentCallerBytes = 0;
+        _pendingPadBytes = 0;
+        _hasProbedByte = false;
+        _recoveryState = new SegmentRecoveryState(
+            segmentIndex,
+            segmentId,
+            GetCorruptionRetryLimit(segmentId));
+    }
+
     private bool TryGetRemainingExactBytes(out long remaining)
     {
         remaining = 0;
@@ -365,6 +431,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
 
     private async Task FinishOpenSegmentAsync()
     {
+        var completedIndex = _openSegmentIndex;
         if (_openSegmentIndex >= 0
             && !_segmentSizes.TryGetExactSize(_openSegmentIndex, out _))
             _segmentSizes.RecordObservedSize(_openSegmentIndex, _openSegmentBytes);
@@ -379,6 +446,13 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         _openSegmentFromLiveFetch = false;
         _openSegmentHole = false;
         _hasProbedByte = false;
+        _openSegmentCallerBytes = 0;
+        _recoveryState = null;
+        if (completedIndex == 0)
+        {
+            _positionPrefixBytes = 0;
+            _positionPrefixRemaining = 0;
+        }
         await DisposeOpenBodyAsync().ConfigureAwait(false);
     }
 
@@ -393,58 +467,87 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             : new RetryableDownloadException(message, failure);
     }
 
-    private async Task HandlePreEmissionCorruptionAsync(
+    private async Task HandleCorruptionAsync(
         int segmentIndex,
         string segmentId,
-        UsenetCorruptArticleException initialFailure,
+        UsenetCorruptArticleException exception,
         CancellationToken cancellationToken)
     {
-        // Dispose first so the transport drains without parsing and fires its
-        // completion callback exactly once before we issue another BODY.
-        await DisposeOpenBodyAsync().ConfigureAwait(false);
-        _hasProbedByte = false;
-
-        var failure = initialFailure;
-        var persistent = new PersistentCorruptionTracker();
-        persistent.NoteOrThrow(initialFailure);
-        for (var attempt = 1; attempt <= GetCorruptionRetryLimit(segmentId); attempt++)
+        if (_openSegmentCallerBytes > 0)
         {
+            await HandlePostEmissionCorruptionAsync(
+                    segmentIndex, segmentId, exception, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var state = GetRecoveryState(segmentIndex, segmentId);
+        await ResetCandidateAsync(segmentIndex).ConfigureAwait(false);
+        Exception failure = exception;
+        var persistent = false;
+        try
+        {
+            state.PersistentCorruption.NoteOrThrow(exception);
+        }
+        catch (PersistentUsenetCorruptionException e)
+        {
+            failure = e;
+            persistent = true;
+        }
+
+        while (!persistent && state.CorruptionAttempts < state.CorruptionRetryLimit)
+        {
+            var attempt = ++state.CorruptionAttempts;
             Log.Debug(
                 failure,
                 "Corrupt segment {SegmentId} from provider {Provider}; retrying to allow provider failover (attempt {Attempt}).",
                 segmentId,
-                failure.ProviderKey,
+                exception.ProviderKey,
                 attempt);
+            if (MultiProviderNntpClient.CurrentReadSessionId is { } sessionId)
+                StreamTrace.TryRetry(sessionId, segmentId, attempt, failure.Message);
             await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken)
                 .ConfigureAwait(false);
 
-            Stream? retryStream = null;
             try
             {
-                var body = await FetchBodyAsync(segmentId, cancellationToken)
+                await FetchAndAcceptCandidateAsync(segmentId, segmentIndex, cancellationToken)
                     .ConfigureAwait(false);
-                retryStream = body.Stream;
-                await SegmentResponseValidator
-                    .ThrowOnSegmentIdMismatchAsync(segmentId, body)
-                    .ConfigureAwait(false);
-                await ProbeLiveStreamAsync(retryStream!, cancellationToken).ConfigureAwait(false);
-                AcceptLiveStream(retryStream!, segmentIndex);
                 return;
             }
             catch (UsenetCorruptArticleException e)
             {
-                await DisposeBodyStreamAsync(retryStream).ConfigureAwait(false);
-                persistent.NoteOrThrow(e);
                 failure = e;
+                try
+                {
+                    state.PersistentCorruption.NoteOrThrow(e);
+                }
+                catch (PersistentUsenetCorruptionException persistentFailure)
+                {
+                    failure = persistentFailure;
+                    persistent = true;
+                }
+            }
+            catch (UsenetArticleNotFoundException e)
+            {
+                await HandleMissingAsync(segmentIndex, segmentId, e, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception e) when (IsRecoverableTransportFailure(e, cancellationToken))
+            {
+                await HandleTransportFailureAsync(
+                        segmentIndex, segmentId, e, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
             }
         }
 
-        var fallback = await TryFallbackSegmentsAsync(segmentIndex, cancellationToken)
+        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, cancellationToken)
             .ConfigureAwait(false);
         if (fallback is not null)
         {
             _stream = fallback;
-            _openSegmentIndex = segmentIndex;
             _openSegmentFromLiveFetch = true;
             _openSegmentHole = false;
             return;
@@ -468,6 +571,142 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         }
 
         ApplyZeroFill(segmentIndex, segmentId, fill, failure, isCorruption: true);
+    }
+
+    private async Task HandleMissingAsync(
+        int segmentIndex,
+        string segmentId,
+        UsenetArticleNotFoundException failure,
+        CancellationToken cancellationToken)
+    {
+        var state = GetRecoveryState(segmentIndex, segmentId);
+        await ResetCandidateAsync(segmentIndex).ConfigureAwait(false);
+        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, cancellationToken)
+            .ConfigureAwait(false);
+        if (fallback is not null)
+        {
+            _stream = fallback;
+            _openSegmentFromLiveFetch = true;
+            _openSegmentHole = false;
+            return;
+        }
+
+        if (_failFastOnFirstSegment && segmentIndex == 0)
+            throw failure;
+        if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out _))
+            throw CreateUnknownLengthFailure(segmentIndex, failure);
+
+        ApplyZeroFill(segmentIndex, failure.SegmentId, fill, failure, isCorruption: false);
+    }
+
+    private async Task HandleTransportFailureAsync(
+        int segmentIndex,
+        string segmentId,
+        Exception initialFailure,
+        CancellationToken cancellationToken)
+    {
+        var state = GetRecoveryState(segmentIndex, segmentId);
+        await ResetCandidateAsync(segmentIndex).ConfigureAwait(false);
+        var failure = initialFailure;
+
+        while (state.TransportAttempts < MaxTransportRetries)
+        {
+            var attempt = ++state.TransportAttempts;
+            Log.Debug(
+                failure,
+                "Segment {SegmentId} failed before emitting bytes; retrying BODY (attempt {Attempt}).",
+                segmentId,
+                attempt);
+            if (MultiProviderNntpClient.CurrentReadSessionId is { } sessionId)
+                StreamTrace.TryRetry(sessionId, segmentId, attempt, failure.Message);
+            await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken)
+                .ConfigureAwait(false);
+
+            try
+            {
+                await FetchAndAcceptCandidateAsync(segmentId, segmentIndex, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (UsenetArticleNotFoundException e)
+            {
+                await HandleMissingAsync(segmentIndex, segmentId, e, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (UsenetCorruptArticleException e)
+            {
+                await HandleCorruptionAsync(segmentIndex, segmentId, e, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception e) when (IsRecoverableTransportFailure(e, cancellationToken))
+            {
+                failure = e;
+            }
+        }
+
+        if (_failFastOnFirstSegment && segmentIndex == 0)
+            ExceptionDispatchInfo.Capture(failure).Throw();
+
+        throw new TransientSegmentExhaustionException(
+            $"Segment {segmentIndex + 1} of {_segmentIds.Length} ({segmentId}) could not be downloaded " +
+            $"while reading \"{_fileName}\" after all retry attempts were exhausted. " +
+            "The client should retry this range request.",
+            failure);
+    }
+
+    private async Task FetchAndAcceptCandidateAsync(
+        string segmentId,
+        int segmentIndex,
+        CancellationToken cancellationToken)
+    {
+        Stream? candidate = null;
+        try
+        {
+            var body = await FetchBodyAsync(segmentId, cancellationToken).ConfigureAwait(false);
+            candidate = body.Stream;
+            await SegmentResponseValidator
+                .ThrowOnSegmentIdMismatchAsync(segmentId, body)
+                .ConfigureAwait(false);
+            await ProbeLiveStreamAsync(candidate!, cancellationToken).ConfigureAwait(false);
+            AcceptLiveStream(candidate!, segmentIndex);
+            candidate = null;
+        }
+        finally
+        {
+            await DisposeBodyStreamAsync(candidate).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ResetCandidateAsync(int segmentIndex)
+    {
+        await DisposeOpenBodyAsync().ConfigureAwait(false);
+        MarkCandidateRestarted(segmentIndex);
+    }
+
+    private void MarkCandidateRestarted(int segmentIndex)
+    {
+        _hasProbedByte = false;
+        _openSegmentBytes = 0;
+        _pendingPadBytes = 0;
+        if (segmentIndex == 0 && _positionPrefixBytes > 0 && _openSegmentCallerBytes == 0)
+            _positionPrefixRemaining = _positionPrefixBytes;
+    }
+
+    private SegmentRecoveryState GetRecoveryState(int segmentIndex, string segmentId)
+    {
+        if (_recoveryState is null ||
+            _recoveryState.SegmentIndex != segmentIndex ||
+            !string.Equals(_recoveryState.SegmentId, segmentId, StringComparison.Ordinal))
+        {
+            _recoveryState = new SegmentRecoveryState(
+                segmentIndex,
+                segmentId,
+                GetCorruptionRetryLimit(segmentId));
+        }
+
+        return _recoveryState;
     }
 
     private int GetCorruptionRetryLimit(string segmentId) =>
@@ -601,10 +840,19 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         _openSegmentFromLiveFetch = false;
         _openSegmentBytes = 0;
         _hasProbedByte = false;
+        MarkCandidateRestarted(segmentIndex);
+    }
+
+    private int ReturnToCaller(int count)
+    {
+        if (count > 0 && !_isPositioning)
+            _openSegmentCallerBytes += count;
+        return count;
     }
 
     private async Task<Stream?> TryFallbackSegmentsAsync(
         int segmentIndex,
+        SegmentRecoveryState state,
         CancellationToken cancellationToken)
     {
         if (_segmentFallbacks is null ||
@@ -613,8 +861,9 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             return null;
 
         var fallbacks = _segmentFallbacks[segmentIndex] ?? [];
-        foreach (var fallbackId in fallbacks)
+        while (state.NextFallbackIndex < fallbacks.Length)
         {
+            var fallbackId = fallbacks[state.NextFallbackIndex++];
             Stream? fallbackStream = null;
             try
             {
@@ -663,6 +912,18 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
 
         return null;
     }
+
+    private static bool IsRecoverableTransportFailure(
+        Exception exception,
+        CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested &&
+        exception is not OutOfMemoryException
+            and not EndOfStreamException
+            and not UsenetArticleNotFoundException
+            and not UsenetCorruptArticleException
+            and not UsenetUnexpectedResponseException
+            and not PersistentUsenetCorruptionException &&
+        exception.IsTransientTransportException();
 
     private async Task<UsenetDecodedBodyResponse> FetchBodyAsync(
         string segmentId,
@@ -726,6 +987,20 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    private sealed class SegmentRecoveryState(
+        int segmentIndex,
+        string segmentId,
+        int corruptionRetryLimit)
+    {
+        internal int SegmentIndex { get; } = segmentIndex;
+        internal string SegmentId { get; } = segmentId;
+        internal int CorruptionRetryLimit { get; } = corruptionRetryLimit;
+        internal PersistentCorruptionTracker PersistentCorruption { get; } = new();
+        internal int CorruptionAttempts { get; set; }
+        internal int TransportAttempts { get; set; }
+        internal int NextFallbackIndex { get; set; }
     }
 
     protected override void Dispose(bool disposing)

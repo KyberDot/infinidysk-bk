@@ -184,11 +184,30 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 cancellationToken);
     }
 
+    internal sealed record FirstSegmentHybridOptions(
+        Memory<string> SegmentIds,
+        INntpClient UsenetClient,
+        int ArticleBufferSize,
+        long EstimatedSegmentSize,
+        bool FailFastOnFirstSegment,
+        bool UsePipelinedBodyRequests,
+        string? FileName,
+        long? ReadBudget,
+        string[][]? SegmentFallbacks,
+        ReadOnlyMemory<long> ExactSegmentSizes,
+        InFlightArticleBudget? InFlightArticleBudget,
+        bool UseContainerAwareFill,
+        long? FirstSegmentFileOffset,
+        int BodyPipelineBatchWidth,
+        HashSet<string>? KnownCorruptSegmentIds,
+        IReadOnlySet<int>? KnownMissingSegmentIndices,
+        CancellationToken CancellationToken);
+
     /// <summary>
-    /// Starts the first segment directly from its decoded BODY, then lazily creates the
-    /// normal buffered pipeline at the segment boundary. This lets a player receive its
-    /// first bytes without waiting for a whole decoded segment to drain, while retaining
-    /// the established prefetch, retry, fill, and lifecycle behavior for sustained reads.
+    /// Starts the first segment directly from its decoded BODY, then starts the normal
+    /// buffered pipeline after the first positive requested read when a remainder is
+    /// known to be required. This lets a player receive its first bytes without waiting
+    /// for a whole decoded segment to drain or for later articles to be admitted.
     /// </summary>
     public static Stream CreateFirstSegmentHybrid(
         Memory<string> segmentIds,
@@ -209,58 +228,360 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         HashSet<string>? knownCorruptSegmentIds = null,
         IReadOnlySet<int>? knownMissingSegmentIndices = null)
     {
-        if (articleBufferSize == 0 || segmentIds.Length <= 1)
+        return CreateFirstSegmentHybridCore(
+            new FirstSegmentHybridOptions(
+                segmentIds,
+                usenetClient,
+                articleBufferSize,
+                estimatedSegmentSize,
+                failFastOnFirstSegment,
+                usePipelinedBodyRequests,
+                fileName,
+                readBudget,
+                segmentFallbacks,
+                exactSegmentSizes,
+                inFlightArticleBudget,
+                useContainerAwareFill,
+                firstSegmentFileOffset,
+                bodyPipelineBatchWidth,
+                knownCorruptSegmentIds,
+                knownMissingSegmentIndices,
+                cancellationToken),
+            firstSegmentPrefixBytes: 0);
+    }
+
+    /// <summary>
+    /// Same hybrid as <see cref="CreateFirstSegmentHybrid"/>, but discards
+    /// <paramref name="firstSegmentPrefixBytes"/> from the raw unbuffered head before
+    /// wrapping it. Prefix discard must not go through the handoff owner — those reads
+    /// are not requested response bytes and must not start the remainder.
+    /// </summary>
+    internal static async Task<Stream> CreatePositionedFirstSegmentHybridAsync(
+        FirstSegmentHybridOptions options,
+        long firstSegmentPrefixBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(firstSegmentPrefixBytes);
+
+        // Fully unbuffered files skip the hybrid. A one-segment remainder still needs
+        // the unbuffered head so an exact-index seek does not drain that article first.
+        if (options.ArticleBufferSize == 0 || options.SegmentIds.Length == 0)
         {
-            return Create(
-                segmentIds, usenetClient, articleBufferSize, estimatedSegmentSize,
-                failFastOnFirstSegment, usePipelinedBodyRequests, cancellationToken, fileName,
-                readBudget, segmentFallbacks, exactSegmentSizes, inFlightArticleBudget,
-                useContainerAwareFill, firstSegmentFileOffset, bodyPipelineBatchWidth,
-                knownCorruptSegmentIds, knownMissingSegmentIndices);
+#pragma warning disable CA2000 // ownership transfers to the caller after prefix discard
+            var stream = Create(
+                options.SegmentIds,
+                options.UsenetClient,
+                options.ArticleBufferSize,
+                options.EstimatedSegmentSize,
+                options.FailFastOnFirstSegment,
+                options.UsePipelinedBodyRequests,
+                options.CancellationToken,
+                options.FileName,
+                options.ReadBudget,
+                options.SegmentFallbacks,
+                options.ExactSegmentSizes,
+                options.InFlightArticleBudget,
+                options.UseContainerAwareFill,
+                options.FirstSegmentFileOffset,
+                options.BodyPipelineBatchWidth,
+                options.KnownCorruptSegmentIds,
+                options.KnownMissingSegmentIndices);
+#pragma warning restore CA2000
+            return await DiscardPrefixOrDisposeAsync(
+                    stream, firstSegmentPrefixBytes, options.CancellationToken)
+                .ConfigureAwait(false);
         }
 
-        var effectiveReadBudget = readBudget ?? NzbWebDAV.WebDav.Requests.RangeContext.GetReadBudget();
-        var firstExactSizes = exactSegmentSizes.Length == segmentIds.Length
-            ? exactSegmentSizes[..1]
+        var plan = BuildFirstSegmentHybridPlan(options, firstSegmentPrefixBytes);
+
+        var positionedHead = await DiscardPrefixOrDisposeAsync(
+                plan.Head, firstSegmentPrefixBytes, options.CancellationToken)
+            .ConfigureAwait(false);
+
+        if (plan.CreateRemainder is null)
+        {
+            StreamStartupTrace.TryRecord(
+                StreamStartupPhase.HandoffNotNeeded,
+                plan.HeadAvailableBytes);
+            return positionedHead;
+        }
+
+        StreamStartupTrace.TryRecord(
+            plan.StartPolicy == RemainderStartPolicy.AfterFirstPositiveRead
+                ? StreamStartupPhase.HandoffEager
+                : StreamStartupPhase.HandoffLegacyLazy,
+            plan.HeadAvailableBytes);
+        return new FirstSegmentHandoffStream(
+            positionedHead,
+            plan.CreateRemainder,
+            plan.StartPolicy,
+            options.CancellationToken);
+    }
+
+    private static async Task<Stream> DiscardPrefixOrDisposeAsync(
+        Stream stream,
+        long prefixBytes,
+        CancellationToken cancellationToken)
+    {
+        if (prefixBytes == 0)
+            return stream;
+
+        try
+        {
+            var discardStarted = Stopwatch.GetTimestamp();
+            if (stream is UnbufferedMultiSegmentStream unbuffered)
+            {
+                await unbuffered.DiscardPrefixBytesAsync(prefixBytes, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await stream.DiscardExactBytesAsync(prefixBytes, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            StreamStartupTrace.TryRecord(
+                StreamStartupPhase.PrefixDiscard,
+                prefixBytes,
+                Stopwatch.GetElapsedTime(discardStarted));
+            return stream;
+        }
+        catch (Exception primaryFailure)
+        {
+            try
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception cleanupFailure) when (cleanupFailure is not OutOfMemoryException)
+            {
+                Log.Debug(
+                    cleanupFailure,
+                    "Failed to dispose first-segment stream after prefix positioning failed.");
+            }
+
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+            throw;
+        }
+    }
+
+    private static Stream CreateFirstSegmentHybridCore(
+        FirstSegmentHybridOptions options,
+        long firstSegmentPrefixBytes)
+    {
+        if (options.ArticleBufferSize == 0 || options.SegmentIds.Length == 0)
+        {
+            StreamStartupTrace.TryRecord(StreamStartupPhase.HandoffNotNeeded);
+            return Create(
+                options.SegmentIds,
+                options.UsenetClient,
+                options.ArticleBufferSize,
+                options.EstimatedSegmentSize,
+                options.FailFastOnFirstSegment,
+                options.UsePipelinedBodyRequests,
+                options.CancellationToken,
+                options.FileName,
+                options.ReadBudget,
+                options.SegmentFallbacks,
+                options.ExactSegmentSizes,
+                options.InFlightArticleBudget,
+                options.UseContainerAwareFill,
+                options.FirstSegmentFileOffset,
+                options.BodyPipelineBatchWidth,
+                options.KnownCorruptSegmentIds,
+                options.KnownMissingSegmentIndices);
+        }
+
+        var plan = BuildFirstSegmentHybridPlan(options, firstSegmentPrefixBytes);
+
+        if (plan.CreateRemainder is null)
+        {
+            StreamStartupTrace.TryRecord(
+                StreamStartupPhase.HandoffNotNeeded,
+                plan.HeadAvailableBytes);
+            return plan.Head;
+        }
+
+        StreamStartupTrace.TryRecord(
+            plan.StartPolicy == RemainderStartPolicy.AfterFirstPositiveRead
+                ? StreamStartupPhase.HandoffEager
+                : StreamStartupPhase.HandoffLegacyLazy,
+            plan.HeadAvailableBytes);
+        return new FirstSegmentHandoffStream(
+            plan.Head,
+            plan.CreateRemainder,
+            plan.StartPolicy,
+            options.CancellationToken);
+    }
+
+    private sealed record FirstSegmentHybridPlan(
+        Stream Head,
+        Func<CancellationToken, Stream>? CreateRemainder,
+        RemainderStartPolicy StartPolicy,
+        long? HeadAvailableBytes);
+
+    private static FirstSegmentHybridPlan BuildFirstSegmentHybridPlan(
+        FirstSegmentHybridOptions options,
+        long firstSegmentPrefixBytes)
+    {
+        var effectiveReadBudget =
+            options.ReadBudget ?? NzbWebDAV.WebDav.Requests.RangeContext.GetReadBudget();
+        var firstExactSizes = options.ExactSegmentSizes.Length == options.SegmentIds.Length
+            ? options.ExactSegmentSizes[..1]
             : default;
-        var remainingExactSizes = exactSegmentSizes.Length == segmentIds.Length
-            ? exactSegmentSizes[1..]
+        var remainingExactSizes = options.ExactSegmentSizes.Length == options.SegmentIds.Length
+            ? options.ExactSegmentSizes[1..]
             : default;
-        var firstFallbacks = segmentFallbacks is { Length: > 0 } ? segmentFallbacks[..1] : null;
-        var remainingFallbacks = segmentFallbacks is { Length: > 1 } ? segmentFallbacks[1..] : null;
-        var firstKnownMissing = knownMissingSegmentIndices?.Where(index => index == 0).ToHashSet();
-        var remainingKnownMissing = knownMissingSegmentIndices?
+        var firstFallbacks = options.SegmentFallbacks is { Length: > 0 }
+            ? options.SegmentFallbacks[..1]
+            : null;
+        var remainingFallbacks = options.SegmentFallbacks is { Length: > 1 }
+            ? options.SegmentFallbacks[1..]
+            : null;
+        var firstKnownMissing = options.KnownMissingSegmentIndices?
+            .Where(index => index == 0)
+            .ToHashSet();
+        var remainingKnownMissing = options.KnownMissingSegmentIndices?
             .Where(index => index > 0)
             .Select(index => index - 1)
             .ToHashSet();
-        var remainingOffset = firstSegmentFileOffset;
+        var remainingOffset = options.FirstSegmentFileOffset;
         if (remainingOffset is not null && firstExactSizes.Length == 1)
         {
             try { remainingOffset = checked(remainingOffset.Value + firstExactSizes.Span[0]); }
             catch (OverflowException) { remainingOffset = null; }
         }
 
-        var remainingBudget = effectiveReadBudget;
-        if (remainingBudget is not null && firstExactSizes.Length == 1)
-            remainingBudget = Math.Max(0, remainingBudget.Value - firstExactSizes.Span[0]);
+        var remainderPlan = PlanHybridRemainder(
+            options.SegmentIds.Length,
+            firstExactSizes,
+            firstSegmentPrefixBytes,
+            effectiveReadBudget);
 
-        return new CombinedStream(CreateFirstSegmentThenBufferedRest());
-
-        IEnumerable<Task<Stream>> CreateFirstSegmentThenBufferedRest()
-        {
-#pragma warning disable CA2000 // ownership transfers to CombinedStream when the yielded task becomes current
-            yield return Task.FromResult<Stream>(new UnbufferedMultiSegmentStream(
-                segmentIds[..1], usenetClient, estimatedSegmentSize, fileName, firstFallbacks,
-                firstExactSizes, useContainerAwareFill, firstSegmentFileOffset,
-                failFastOnFirstSegment, knownCorruptSegmentIds, firstKnownMissing));
+#pragma warning disable CA2000 // ownership transfers to the caller / FirstSegmentHandoffStream
+        Stream head = new UnbufferedMultiSegmentStream(
+            options.SegmentIds[..1],
+            options.UsenetClient,
+            options.EstimatedSegmentSize,
+            options.FileName,
+            firstFallbacks,
+            firstExactSizes,
+            options.UseContainerAwareFill,
+            options.FirstSegmentFileOffset,
+            options.FailFastOnFirstSegment,
+            options.KnownCorruptSegmentIds,
+            firstKnownMissing);
 #pragma warning restore CA2000
-            yield return Task.FromResult(Create(
-                segmentIds[1..], usenetClient, articleBufferSize, estimatedSegmentSize,
-                failFastOnFirstSegment: false, usePipelinedBodyRequests, cancellationToken,
-                fileName, remainingBudget, remainingFallbacks, remainingExactSizes,
-                inFlightArticleBudget, useContainerAwareFill, remainingOffset,
-                bodyPipelineBatchWidth, knownCorruptSegmentIds, remainingKnownMissing));
+
+        if (!remainderPlan.NeedsRemainder)
+        {
+            return new FirstSegmentHybridPlan(
+                head,
+                null,
+                RemainderStartPolicy.None,
+                remainderPlan.HeadAvailableBytes);
         }
+
+        // Capture every remainder input in this closure. Do not re-read AsyncLocal
+        // RangeContext after the handoff scheduling boundary.
+        Func<CancellationToken, Stream> createRemainder = lifetimeToken => Create(
+            options.SegmentIds[1..],
+            options.UsenetClient,
+            options.ArticleBufferSize,
+            options.EstimatedSegmentSize,
+            failFastOnFirstSegment: false,
+            options.UsePipelinedBodyRequests,
+            lifetimeToken,
+            options.FileName,
+            remainderPlan.RemainderBudget,
+            remainingFallbacks,
+            remainingExactSizes,
+            options.InFlightArticleBudget,
+            options.UseContainerAwareFill,
+            remainingOffset,
+            options.BodyPipelineBatchWidth,
+            options.KnownCorruptSegmentIds,
+            remainingKnownMissing);
+
+        return new FirstSegmentHybridPlan(
+            head,
+            createRemainder,
+            remainderPlan.StartPolicy,
+            remainderPlan.HeadAvailableBytes);
+    }
+
+    internal readonly record struct HybridRemainderPlan(
+        long? HeadAvailableBytes,
+        long? RemainderBudget,
+        bool NeedsRemainder,
+        RemainderStartPolicy StartPolicy);
+
+    internal static HybridRemainderPlan PlanHybridRemainder(
+        int segmentCount,
+        ReadOnlyMemory<long> firstExactSizes,
+        long firstSegmentPrefixBytes,
+        long? readBudget)
+    {
+        var hasExactHead = firstExactSizes.Length == 1;
+        long? headAvailable = null;
+        if (hasExactHead)
+        {
+            var segmentSize = firstExactSizes.Span[0];
+            if (firstSegmentPrefixBytes < 0 || firstSegmentPrefixBytes >= segmentSize)
+            {
+                throw new InvalidOperationException(
+                    "Exact-index prefix is outside the mapped target segment.");
+            }
+
+            headAvailable = checked(segmentSize - firstSegmentPrefixBytes);
+        }
+
+        if (segmentCount <= 1)
+        {
+            return new HybridRemainderPlan(
+                headAvailable,
+                null,
+                false,
+                RemainderStartPolicy.None);
+        }
+
+        if (hasExactHead)
+        {
+            if (readBudget is { } budget)
+            {
+                var headContribution = Math.Min(budget, headAvailable!.Value);
+                var remainderBudget = checked(budget - headContribution);
+                var needsRemainder = remainderBudget > 0;
+                return new HybridRemainderPlan(
+                    headAvailable,
+                    remainderBudget,
+                    needsRemainder,
+                    needsRemainder
+                        ? RemainderStartPolicy.AfterFirstPositiveRead
+                        : RemainderStartPolicy.None);
+            }
+
+            return new HybridRemainderPlan(
+                headAvailable,
+                null,
+                true,
+                RemainderStartPolicy.AfterFirstPositiveRead);
+        }
+
+        // Unknown first-segment size: a full GET always needs the remainder, so eagerness
+        // is safe. A finite budget cannot prove the head will not satisfy it, so keep
+        // the legacy lazy-at-EOF start and do not subtract an unknown head.
+        if (readBudget is null)
+        {
+            return new HybridRemainderPlan(
+                null,
+                null,
+                true,
+                RemainderStartPolicy.AfterFirstPositiveRead);
+        }
+
+        return new HybridRemainderPlan(
+            null,
+            readBudget,
+            true,
+            RemainderStartPolicy.AtHeadEof);
     }
 
     private MultiSegmentStream
