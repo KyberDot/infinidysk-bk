@@ -60,6 +60,7 @@ import { Icon } from "~/components/ui";
 import type { AppOutletContext } from "~/auth/authorization";
 import { isSettingsTabDisabled } from "~/utils/service-provider";
 import { withUrlBase } from "~/utils/url-base";
+import { parseConfigBoolean } from "~/utils/config-bool";
 
 const defaultConfig = {
   "general.base-url": "",
@@ -164,7 +165,7 @@ const defaultConfig = {
   "preflight.max-attempts": "20",
   "preflight.ttl-seconds": "120",
   "preflight.indexer-max-wait-seconds": "5",
-  "repair.enable": "false",
+  "repair.enable": "true",
   "repair.healthcheck-concurrency": "50",
   "repair.healthcheck-workers": "1",
   "repair.healthcheck-depth": "standard",
@@ -591,13 +592,13 @@ function Body(props: BodyProps) {
                 {healthQueueResetCount !== null &&
                   ` ${healthQueueResetCount.toLocaleString()} files queued for re-check.`}
                 {healthQueueResetError && ` ${healthQueueResetError}`}
-                {newConfig["repair.enable"] !== "true" &&
+                {!parseConfigBoolean(newConfig["repair.enable"]) &&
                   " Enable Background Repairs to re-check library health."}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {!isReadOnly &&
-                newConfig["repair.enable"] === "true" &&
+                parseConfigBoolean(newConfig["repair.enable"]) &&
                 healthQueueResetCount === null && (
                   <Button
                     variant="ghost"

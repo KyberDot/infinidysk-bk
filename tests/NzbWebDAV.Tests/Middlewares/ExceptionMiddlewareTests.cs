@@ -261,10 +261,14 @@ public class ExceptionMiddlewareTests
         var context = CreateDavItemContext(hasStarted: false, lifetimeFeature);
         var davItem = Assert.IsType<DavItem>(context.Items["DavItem"]);
         var failureTracker = new StreamingFailureTracker();
-        // Default ConfigManager: repair.enable is off, so repair must be skipped with a reason.
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = ConfigKeys.RepairEnable, ConfigValue = "false" },
+        ]);
         var middleware = CreateMiddleware(
             _ => throw new UsenetArticleNotFoundException("missing-segment"),
-            new ConfigManager(),
+            configManager,
             failureTracker);
 
         var events = await CaptureLogsAsync(() => middleware.InvokeAsync(context));
@@ -726,7 +730,7 @@ public class ExceptionMiddlewareTests
         var middleware = CreateMiddleware(
             _ => throw new UsenetCorruptArticleException(
                 segmentId, "provider-a", new InvalidDataException("CRC mismatch")),
-            new ConfigManager(),
+            CreateRepairDisabledConfig(),
             failureTracker);
 
         var events = await CaptureLogsAsync(() => middleware.InvokeAsync(context));
@@ -885,6 +889,52 @@ public class ExceptionMiddlewareTests
     }
 
     [Fact]
+    public void GetRepairDisabledReason_DefaultsToEnabledWhenUnset()
+    {
+        var configManager = new ConfigManager();
+
+        Assert.Null(configManager.GetRepairDisabledReason());
+        Assert.True(configManager.IsRepairJobEnabled());
+        Assert.True(configManager.IsPar2RepairEnabled());
+    }
+
+    [Fact]
+    public void GetRepairDisabledReason_ExplicitFalseDisablesJob()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = ConfigKeys.RepairEnable, ConfigValue = "false" },
+        ]);
+
+        Assert.Equal("Enable Background Repairs is off", configManager.GetRepairDisabledReason());
+        Assert.False(configManager.IsRepairJobEnabled());
+        Assert.False(configManager.IsPar2RepairEnabled());
+    }
+
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("TRUE", true)]
+    [InlineData(" true ", true)]
+    [InlineData("false", false)]
+    [InlineData("FALSE", false)]
+    [InlineData(" false ", false)]
+    [InlineData("bogus", true)]
+    public void GetRepairDisabledReason_ParsesRepairEnableWithoutThrowing(string value, bool enabled)
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = ConfigKeys.RepairEnable, ConfigValue = value },
+        ]);
+
+        Assert.Equal(enabled, configManager.IsRepairJobEnabled());
+        Assert.Equal(
+            enabled ? null : "Enable Background Repairs is off",
+            configManager.GetRepairDisabledReason());
+    }
+
+    [Fact]
     public void GetRepairDisabledReason_NamesDisabledToggle()
     {
         Assert.Equal("Enable Background Repairs is off", ConfigManager.GetRepairDisabledReason(false));
@@ -1012,6 +1062,16 @@ public class ExceptionMiddlewareTests
             SubType = DavItem.ItemSubType.MultipartFile,
         };
         return context;
+    }
+
+    private static ConfigManager CreateRepairDisabledConfig()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = ConfigKeys.RepairEnable, ConfigValue = "false" },
+        ]);
+        return configManager;
     }
 
     private static ConfigManager CreateRepairEnabledConfig()
