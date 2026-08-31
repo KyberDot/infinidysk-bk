@@ -110,8 +110,30 @@ export function PageTable({
         </thead>
         <tbody>{children}</tbody>
       </table>
-      {footer && <div className="py-3 text-center">{footer}</div>}
+      {footer && <div className="px-4 py-3 sm:px-6">{footer}</div>}
     </div>
+  );
+}
+
+export function PageGroupRow({
+  label,
+  count,
+  showCompleted,
+}: {
+  label: string;
+  count?: number;
+  showCompleted?: boolean;
+}) {
+  return (
+    <tr>
+      <td
+        colSpan={showCompleted ? 8 : 7}
+        className="bg-base-200 py-2 text-xs font-semibold uppercase tracking-wide text-base-content/50"
+      >
+        {label}
+        {count != null && <span className="ml-2 font-mono font-normal tabular-nums">{count}</span>}
+      </td>
+    </tr>
   );
 }
 
