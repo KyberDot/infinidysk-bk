@@ -53,6 +53,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     // the producer; DisposeCoreAsync must join them so DisposeAsync does not return
     // while their BudgetedStream leases are still held (#840 scrub wedge).
     private readonly ConcurrentQueue<Task> _orphanedDisposals = new();
+    private readonly ConcurrentQueue<Task> _batchCompletionObservers = new();
     private readonly HashSet<string>? _knownCorruptSegmentIds;
     private readonly IReadOnlySet<int>? _knownMissingSegmentIndices;
 
@@ -421,8 +422,10 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 if (liveIndexes.Length > 0)
                 {
                     var liveIds = liveIndexes.Select(index => segmentIds[index]).ToArray();
-                    liveResponses = await FetchAttributedBatchResponsesAsync(liveIds, cancellationToken)
+                    var fetched = await FetchAttributedBatchResponsesAsync(liveIds, cancellationToken)
                         .ConfigureAwait(false);
+                    liveResponses = fetched.Responses;
+                    EnqueueBatchCompletionObserver(fetched.Completion);
                 }
 
                 streamTasks = new Task<SegmentDownloadResult>[batchCount];
@@ -531,7 +534,11 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         return false;
     }
 
-    private async Task<Task<UsenetDecodedBodyResponse>[]> FetchAttributedBatchResponsesAsync(
+    private sealed record FetchedBodyBatch(
+        Task<UsenetDecodedBodyResponse>[] Responses,
+        Task Completion);
+
+    private async Task<FetchedBodyBatch> FetchAttributedBatchResponsesAsync(
         SegmentId[] liveIds,
         CancellationToken cancellationToken)
     {
@@ -552,15 +559,47 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 }
                 catch (Exception e) when (e is not OutOfMemoryException)
                 {
-                    Log.Debug(e, "Failed to drain BODY response after batch size mismatch for {FileName}.", _fileName);
+                    Log.Debug(e, "Failed to drain BODY response after batch size mismatch.");
                 }
+            }
+
+            try
+            {
+                await batch.Completion.ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                Log.Debug(e, "Failed to observe BODY batch completion after size mismatch.");
             }
 
             throw new InvalidOperationException(
                 $"Pipelined BODY returned {batch.Responses.Count} responses for {liveIds.Length} requests.");
         }
 
-        return batch.Responses.ToArray();
+        return new FetchedBodyBatch(batch.Responses.ToArray(), batch.Completion);
+    }
+
+    private void EnqueueBatchCompletionObserver(Task completion)
+    {
+        while (_batchCompletionObservers.TryPeek(out var head) &&
+               head.Status == TaskStatus.RanToCompletion)
+        {
+            _batchCompletionObservers.TryDequeue(out _);
+        }
+
+        _batchCompletionObservers.Enqueue(ObserveBatchCompletionAsync(completion));
+    }
+
+    private static async Task ObserveBatchCompletionAsync(Task completion)
+    {
+        try
+        {
+            await completion.ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Log.Debug(exception, "Pipelined BODY batch completion failed.");
+        }
     }
 
     /// <summary>
@@ -1674,51 +1713,59 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     {
         try
         {
+            try
+            {
 #pragma warning disable CA1849 // synchronous Cancel is required -- teardown callbacks must run before _streamTasks.Writer completes; CancelAsync would race TryComplete
-            _cts.Cancel();
+                _cts.Cancel();
 #pragma warning restore CA1849
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already torn down.
+            }
+
+            _streamTasks.Writer.TryComplete();
+
+            if (_stream is not null)
+            {
+                await _stream.DisposeAsync().ConfigureAwait(false);
+                _stream = null;
+            }
+
+            // Drain queued segments concurrently so a task blocked on LeaseAsync can
+            // wake when another queued BudgetedStream releases its lease.
+            var pending = new List<Task>();
+            while (_streamTasks.Reader.TryRead(out var streamTask))
+                pending.Add(DisposeStreamAsync(streamTask, releaseInFlight: true));
+
+            try
+            {
+                await _downloadTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Producer failures are surfaced on ReadAsync; teardown only needs cleanup.
+            }
+
+            while (_streamTasks.Reader.TryRead(out var streamTask))
+                pending.Add(DisposeStreamAsync(streamTask, releaseInFlight: true));
+
+            // Join the producer's out-of-band disposals so leases they hold are released
+            // before DisposeAsync completes. The producer has exited by now (awaited above),
+            // so no new orphans can be enqueued; drain is safe without a lock.
+            while (_orphanedDisposals.TryDequeue(out var orphaned))
+                pending.Add(orphaned);
+
+            while (_batchCompletionObservers.TryDequeue(out var observer))
+                pending.Add(observer);
+
+            if (pending.Count > 0)
+                await Task.WhenAll(pending).ConfigureAwait(false);
         }
-        catch (ObjectDisposedException)
+        finally
         {
-            // Already torn down.
+            _cts.Dispose();
         }
-
-        _streamTasks.Writer.TryComplete();
-
-        if (_stream is not null)
-        {
-            await _stream.DisposeAsync().ConfigureAwait(false);
-            _stream = null;
-        }
-
-        // Drain queued segments concurrently so a task blocked on LeaseAsync can
-        // wake when another queued BudgetedStream releases its lease.
-        var pending = new List<Task>();
-        while (_streamTasks.Reader.TryRead(out var streamTask))
-            pending.Add(DisposeStreamAsync(streamTask, releaseInFlight: true));
-
-        try
-        {
-            await _downloadTask.ConfigureAwait(false);
-        }
-        catch
-        {
-            // Producer failures are surfaced on ReadAsync; teardown only needs cleanup.
-        }
-
-        while (_streamTasks.Reader.TryRead(out var streamTask))
-            pending.Add(DisposeStreamAsync(streamTask, releaseInFlight: true));
-
-        // Join the producer's out-of-band disposals so leases they hold are released
-        // before DisposeAsync completes. The producer has exited by now (awaited above),
-        // so no new orphans can be enqueued; drain is safe without a lock.
-        while (_orphanedDisposals.TryDequeue(out var orphaned))
-            pending.Add(orphaned);
-
-        if (pending.Count > 0)
-            await Task.WhenAll(pending).ConfigureAwait(false);
-
-        _cts.Dispose();
     }
 
     private readonly record struct DrainedSegment(Stream Stream, bool ShortPadded);

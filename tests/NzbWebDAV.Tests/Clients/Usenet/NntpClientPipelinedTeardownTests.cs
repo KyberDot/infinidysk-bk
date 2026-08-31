@@ -173,19 +173,89 @@ public class NntpClientPipelinedTeardownTests
         Assert.Equal(SemaphorePriority.High, client.BatchPriority);
     }
 
+    [Fact]
+    public async Task DecodedBodiesPipelinedAsync_FullyEnumerated_DoesNotJoinBatchCompletion()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new ScriptedBatchClient(gate.Task);
+        var enumeration = Task.Run(async () =>
+        {
+            await foreach (var result in client.DecodedBodiesPipelinedAsync(
+                               ["a@example"], depth: 1, CancellationToken.None))
+            {
+                Assert.True(result.Found);
+                if (result.Stream is not null)
+                    await result.Stream.DisposeAsync();
+            }
+        });
+
+        await client.BatchIssued.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await enumeration.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(gate.Task.IsCompleted);
+        gate.SetResult();
+    }
+
+    [Fact]
+    public async Task DecodedBodiesPipelinedAsync_EarlyBreak_AwaitsBatchCompletionAfterCleanup()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new ScriptedBatchClient(gate.Task);
+        var enumeration = Task.Run(async () =>
+        {
+            await foreach (var result in client.DecodedBodiesPipelinedAsync(
+                               ["a@example", "b@example"], depth: 2, CancellationToken.None))
+            {
+                Assert.True(result.Found);
+                break;
+            }
+        });
+
+        await client.BatchIssued.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline && !client.Streams.TrueForAll(stream => stream.Disposed))
+            await Task.Delay(10);
+
+        Assert.True(client.Streams.TrueForAll(stream => stream.Disposed));
+        Assert.False(enumeration.IsCompleted);
+        gate.SetResult();
+        await enumeration.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task DecodedBodiesPipelinedAsync_CompletionFault_IsObserved()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new ScriptedBatchClient(gate.Task);
+        var enumeration = Task.Run(async () =>
+        {
+            await foreach (var result in client.DecodedBodiesPipelinedAsync(
+                               ["a@example"], depth: 1, CancellationToken.None))
+            {
+                Assert.True(result.Found);
+                if (result.Stream is not null)
+                    await result.Stream.DisposeAsync();
+            }
+        });
+
+        gate.SetException(new IOException("batch-completion"));
+        await enumeration.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private sealed class TrackingYencStream : YencStream
     {
         public TrackingYencStream() : base(new MemoryStream([], writable: false))
         {
         }
 
-        public int DisposeCount { get; private set; }
+        private int _disposeCount;
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
 
         public bool Disposed => DisposeCount > 0;
 
         protected override void Dispose(bool disposing)
         {
-            DisposeCount++;
+            Interlocked.Increment(ref _disposeCount);
             base.Dispose(disposing);
         }
     }
@@ -366,11 +436,13 @@ public class NntpClientPipelinedTeardownTests
         }
     }
 
-    private sealed class ScriptedBatchClient : NntpClient
+    private sealed class ScriptedBatchClient(Task? completion = null) : NntpClient
     {
         public List<TrackingYencStream> Streams { get; } = [];
 
         public SemaphorePriority? BatchPriority { get; private set; }
+
+        public TaskCompletionSource BatchIssued { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override Task<UsenetDecodedBodyBatch> DecodedBodiesAsync(
             IReadOnlyList<SegmentId> segmentIds,
@@ -392,7 +464,12 @@ public class NntpClientPipelinedTeardownTests
                 }));
             }
 
-            return Task.FromResult(new UsenetDecodedBodyBatch { Responses = responses });
+            BatchIssued.TrySetResult();
+            return Task.FromResult(new UsenetDecodedBodyBatch
+            {
+                Responses = responses,
+                Completion = completion ?? Task.CompletedTask,
+            });
         }
 
         public override Task ConnectAsync(
