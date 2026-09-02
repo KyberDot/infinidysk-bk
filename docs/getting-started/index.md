@@ -32,9 +32,9 @@ Choose a path based on where you are:
 
     ---
 
-    Admin account, Usenet provider, WebDAV credentials, import strategy.
+    New installs continue from account creation; existing installs open the guide after the first administrator login following upgrade.
 
-    [:octicons-arrow-right-24: First run](first-run.md)
+    [:octicons-arrow-right-24: First run](first-run.md) · [Setup Guide](setup-guide.md)
 
 -   :material-sync:{ .lg .middle } __Connect *Arr__
 
