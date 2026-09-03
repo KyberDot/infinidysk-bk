@@ -122,6 +122,56 @@ public class RcloneClientTests : IDisposable
         Assert.Equal("full", result.Options?.CacheMode);
     }
 
+    [Theory]
+    [InlineData(0, "off")]
+    [InlineData(1, "minimal")]
+    [InlineData(2, "writes")]
+    [InlineData(3, "full")]
+    [InlineData(4, "unknown")]
+    public async Task GetVfsStats_WithNumericCacheMode_ReturnsName(int cacheMode, string expected)
+    {
+        RcloneClient.TestHandler = CreateHandler(
+            ("POST /vfs/stats", SuccessResponse($"{{\"opt\":{{\"CacheMode\":{cacheMode}}}}}")));
+
+        var result = await RcloneClient.GetVfsStats(
+            "http://rclone.test",
+            "rclone",
+            "secret");
+
+        Assert.True(result.Success);
+        Assert.Equal(expected, result.Options?.CacheMode);
+    }
+
+    [Fact]
+    public async Task GetVfsStats_WithIncompatibleCacheMode_ReturnsInspectionError()
+    {
+        RcloneClient.TestHandler = CreateHandler(
+            ("POST /vfs/stats", SuccessResponse("{\"opt\":{\"CacheMode\":true}}")));
+
+        var result = await RcloneClient.GetVfsStats(
+            "http://rclone.test",
+            "rclone",
+            "secret");
+
+        Assert.False(result.Success);
+        Assert.Equal("Rclone returned an incompatible response", result.Error);
+    }
+
+    [Fact]
+    public async Task GetVfsStats_WithNullResponse_ReturnsInspectionError()
+    {
+        RcloneClient.TestHandler = CreateHandler(
+            ("POST /vfs/stats", SuccessResponse("null")));
+
+        var result = await RcloneClient.GetVfsStats(
+            "http://rclone.test",
+            "rclone",
+            "secret");
+
+        Assert.False(result.Success);
+        Assert.Equal("Rclone returned an incompatible response", result.Error);
+    }
+
     [Fact]
     public void SharedHttpClient_HasExplicitTimeout()
     {

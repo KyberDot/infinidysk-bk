@@ -179,9 +179,6 @@ function SymlinkPlaybackStep({
 --allow-non-empty
 --vfs-cache-mode=full
 --buffer-size=0
---vfs-read-chunk-streams=1
---vfs-read-chunk-size=1M
---vfs-read-chunk-size-limit=512M
 --vfs-read-ahead=512M
 --vfs-cache-max-size=50G
 --vfs-cache-max-age=1w
@@ -355,7 +352,10 @@ function SymlinkPlaybackStep({
                 Test
               </Button>
             </div>
-            <p className="validator-hint">Enter an absolute URL for the sidecar RC endpoint.</p>
+            <p className="validator-hint">
+              Enter an absolute URL using the rclone service name. Loopback only works in a shared
+              network namespace.
+            </p>
           </Field>
         </ManagedSetting>
         <ManagedSetting configKey="rclone.user">
