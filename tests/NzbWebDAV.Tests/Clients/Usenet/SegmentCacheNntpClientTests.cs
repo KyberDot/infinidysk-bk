@@ -1145,6 +1145,102 @@ public sealed class SegmentCacheNntpClientTests
         await ReadAndDisposeAsync(response.Stream!);
     }
 
+    [Fact]
+    public void PurgeDirectory_RemovesCacheArtifacts_AndLeavesUnrelatedFiles()
+    {
+        var cacheDir = Path.Join(
+            Path.GetTempPath(), "nzbdav-segment-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteCacheEntry(cacheDir, "segment-1", "one"u8.ToArray());
+            WriteCacheEntry(cacheDir, "segment-2", "two"u8.ToArray());
+            var blob = CacheBlobPath(cacheDir, "segment-1");
+            var unique = Guid.NewGuid().ToString("N");
+            File.WriteAllText(blob + "." + unique + ".tmp", "partial");
+            File.WriteAllText(blob + ".h." + unique + ".tmp", "partial");
+
+            var shard = Path.GetDirectoryName(blob)!;
+            var unrelated = Path.Join(shard, "notes.txt");
+            File.WriteAllText(unrelated, "keep");
+            var foreignTemp = blob + ".notes.tmp";
+            File.WriteAllText(foreignTemp, "keep");
+            var otherDir = Path.Join(cacheDir, "backups");
+            Directory.CreateDirectory(otherDir);
+            File.WriteAllText(Path.Join(otherDir, "db.bak"), "keep");
+
+            var result = SegmentCacheNntpClient.PurgeDirectory(cacheDir);
+
+            Assert.Equal(6, result.Deleted);
+            Assert.Equal(2, result.Skipped);
+            Assert.Equal(0, result.Failed);
+            Assert.Null(result.FailureReason);
+            Assert.True(File.Exists(unrelated));
+            Assert.True(File.Exists(foreignTemp));
+            Assert.True(File.Exists(Path.Join(otherDir, "db.bak")));
+            Assert.False(File.Exists(blob));
+            Assert.False(File.Exists(CacheBlobPath(cacheDir, "segment-2")));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(CacheBlobPath(cacheDir, "segment-2"))));
+            Assert.True(Directory.Exists(cacheDir));
+        }
+        finally
+        {
+            if (Directory.Exists(cacheDir))
+                Directory.Delete(cacheDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PurgeDirectory_MissingDirectory_IsNoOp()
+    {
+        var cacheDir = Path.Join(
+            Path.GetTempPath(), "nzbdav-segment-cache-" + Guid.NewGuid().ToString("N"));
+
+        var result = SegmentCacheNntpClient.PurgeDirectory(cacheDir);
+
+        Assert.Equal(0, result.Deleted);
+        Assert.Equal(0, result.Failed);
+        Assert.False(Directory.Exists(cacheDir));
+    }
+
+    [Fact]
+    public void PurgeDirectory_IgnoresSymlinkedShardDirectory()
+    {
+        var root = Path.Join(
+            Path.GetTempPath(), "nzbdav-segment-cache-" + Guid.NewGuid().ToString("N"));
+        var cacheDir = Path.Join(root, "cache");
+        var outside = Path.Join(root, "outside");
+        try
+        {
+            Directory.CreateDirectory(cacheDir);
+            // Layout a real cache entry outside the cache tree, then link a shard name to it.
+            WriteCacheEntry(outside, "segment-1", "one"u8.ToArray());
+            var outsideBlob = CacheBlobPath(outside, "segment-1");
+            var outsideShard = Path.GetDirectoryName(outsideBlob)!;
+            var linkedShard = Path.Join(cacheDir, Path.GetFileName(outsideShard));
+            try
+            {
+                Directory.CreateSymbolicLink(linkedShard, outsideShard);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return; // symlinks unavailable on this host
+            }
+
+            var result = SegmentCacheNntpClient.PurgeDirectory(cacheDir);
+
+            Assert.Equal(0, result.Deleted);
+            Assert.Equal(0, result.Failed);
+            Assert.True(File.Exists(outsideBlob));
+            Assert.True(File.Exists(outsideBlob + ".h"));
+            Assert.True(Directory.Exists(linkedShard));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static async Task ReadAndDisposeAsync(Stream stream)
     {
         await using (stream)
