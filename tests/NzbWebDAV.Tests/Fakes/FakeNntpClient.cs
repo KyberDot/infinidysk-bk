@@ -26,7 +26,11 @@ internal sealed class FakeNntpClient(
     public int BodyRequestCount { get; private set; }
     public int HeaderProbeCount { get; private set; }
     public int CompletionCallbackCount { get; private set; }
+    public int? LastPrewarmTarget { get; private set; }
+    public Exception? PrewarmException { get; set; }
     public CancellationToken LastBatchToken { get; private set; }
+    public TaskCompletionSource<int> FirstPrewarmRequested { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource FirstBatchRequested { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Dictionary<string, int> BodyRequestCounts { get; } = new(StringComparer.Ordinal);
@@ -43,6 +47,18 @@ internal sealed class FakeNntpClient(
     /// so tests can exercise mismatch rejection without a live NNTP scramble.
     /// </summary>
     public string? ForcedResponseSegmentId { get; set; }
+
+    public override Task PrewarmConnectionsAsync(
+        int targetConnections,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        LastPrewarmTarget = targetConnections;
+        FirstPrewarmRequested.TrySetResult(targetConnections);
+        if (PrewarmException is not null)
+            throw PrewarmException;
+        return Task.CompletedTask;
+    }
 
     public override Task ConnectAsync(
         string host, int port, bool useSsl, CancellationToken cancellationToken) =>
