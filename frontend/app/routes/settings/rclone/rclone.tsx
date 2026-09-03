@@ -3,7 +3,14 @@ import { Alert, Spinner, Tooltip } from "~/components/ui/feedback";
 import { ManagedSetting, SettingsCard, SettingsIntro, SettingsPage } from "~/components/ui";
 import { Input, Toggle } from "~/components/ui/form";
 import { Icon } from "~/components/ui/icon";
-import { type Dispatch, type SetStateAction, useState, useCallback, useEffect } from "react";
+import {
+  type Dispatch,
+  type SetStateAction,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import { withUrlBase } from "~/utils/url-base";
 
 function formatTimeAgo(isoDate: string): string {
@@ -28,15 +35,20 @@ export function RcloneSettings({ config, setNewConfig }: RcloneSettingsProps) {
   const [testError, setTestError] = useState<string | null>(null);
   const [invalidationError, setInvalidationError] = useState<string | null>(null);
   const [invalidationErrorAt, setInvalidationErrorAt] = useState<string | null>(null);
+  const [readAheadBytes, setReadAheadBytes] = useState<number | null>(null);
+  // Bumped whenever connection inputs change so in-flight test responses are discarded.
+  const testGeneration = useRef(0);
 
   const rcloneHost = config["rclone.host"];
   const rcloneUser = config["rclone.user"];
   const rclonePass = config["rclone.pass"];
   useEffect(() => {
+    testGeneration.current += 1;
     setConnectionState("idle");
     setTestError(null);
     setInvalidationError(null);
     setInvalidationErrorAt(null);
+    setReadAheadBytes(null);
   }, [rcloneHost, rcloneUser, rclonePass]);
 
   const testConnection = useCallback(async () => {
@@ -45,10 +57,12 @@ export function RcloneSettings({ config, setNewConfig }: RcloneSettingsProps) {
       return;
     }
 
+    const generation = ++testGeneration.current;
     setConnectionState("testing");
     setTestError(null);
     setInvalidationError(null);
     setInvalidationErrorAt(null);
+    setReadAheadBytes(null);
 
     try {
       const formData = new FormData();
@@ -66,13 +80,19 @@ export function RcloneSettings({ config, setNewConfig }: RcloneSettingsProps) {
         status?: boolean;
         connected?: boolean;
         error?: string;
+        readAheadBytes?: number | null;
         lastInvalidationError?: string | null;
         lastInvalidationErrorAt?: string | null;
       };
 
+      if (generation !== testGeneration.current) {
+        return;
+      }
+
       if (result.status && result.connected) {
         setConnectionState("success");
         setTestError(null);
+        setReadAheadBytes(result.readAheadBytes ?? null);
         setInvalidationError(result.lastInvalidationError ?? null);
         setInvalidationErrorAt(result.lastInvalidationErrorAt ?? null);
       } else {
@@ -80,10 +100,19 @@ export function RcloneSettings({ config, setNewConfig }: RcloneSettingsProps) {
         setTestError(result.error || "Connection test failed");
       }
     } catch (error) {
+      if (generation !== testGeneration.current) {
+        return;
+      }
       setConnectionState("error");
       setTestError(error instanceof Error ? error.message : "Connection test failed");
     }
   }, [config]);
+
+  const readAheadConflictsWithSegmentCache =
+    connectionState === "success" &&
+    readAheadBytes !== null &&
+    readAheadBytes > 0 &&
+    config["usenet.segment-cache.enabled"] === "true";
 
   return (
     <SettingsPage>
@@ -177,6 +206,26 @@ export function RcloneSettings({ config, setNewConfig }: RcloneSettingsProps) {
               {connectionState === "success" && (
                 <Alert variant="success" className="text-xs py-2">
                   Connection test successful
+                </Alert>
+              )}
+              {readAheadConflictsWithSegmentCache && (
+                <Alert variant="warning" className="text-xs py-2">
+                  This rclone mount has VFS read-ahead enabled while Segment Cache is also on. Both
+                  buffer ahead for playback, so the Segment Cache only adds disk writes. Disable it
+                  under{" "}
+                  <a className="link font-medium" href={withUrlBase("/settings?tab=streaming")}>
+                    Streaming
+                  </a>{" "}
+                  or re-run the{" "}
+                  <a
+                    className="link font-medium"
+                    href={withUrlBase(
+                      `/setup?returnTo=${encodeURIComponent("/settings?tab=rclone")}`,
+                    )}
+                  >
+                    Setup Guide
+                  </a>{" "}
+                  to apply the recommended configuration.
                 </Alert>
               )}
               {connectionState === "success" && invalidationError && (
