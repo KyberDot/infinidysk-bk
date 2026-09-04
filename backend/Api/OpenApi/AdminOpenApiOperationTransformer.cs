@@ -42,6 +42,31 @@ internal sealed class AdminOpenApiOperationTransformer : IOpenApiOperationTransf
                 },
             };
         }
+        if (route == "api/requeue-action-needed-health-checks")
+        {
+            operation.Responses["200"] = new OpenApiResponse
+            {
+                Description = "Action-needed files were queued for another health check.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchemaReference("RequeueActionNeededHealthChecksResponse"),
+                    },
+                },
+            };
+            operation.Responses["409"] = new OpenApiResponse
+            {
+                Description = "Background repairs are disabled.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchemaReference("BaseApiResponse"),
+                    },
+                },
+            };
+        }
         if (!operation.Responses.ContainsKey("200") && !operation.Responses.ContainsKey("202"))
             operation.Responses["200"] = new OpenApiResponse { Description = "Success." };
         ApplyMissingPayloadContractOverrides(operation, route, verb);
