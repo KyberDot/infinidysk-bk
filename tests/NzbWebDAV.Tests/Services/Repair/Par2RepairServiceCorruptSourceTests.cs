@@ -1,4 +1,3 @@
-using System.Text;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Config;
@@ -10,6 +9,7 @@ using NzbWebDAV.Par2Recovery;
 using NzbWebDAV.Services.Repair;
 using NzbWebDAV.Tests.Database;
 using NzbWebDAV.Tests.Fakes;
+using SeededRelease = NzbWebDAV.Tests.Services.Repair.Par2RepairTestReleaseBuilder.SeededRelease;
 
 namespace NzbWebDAV.Tests.Services.Repair;
 
@@ -234,10 +234,14 @@ public sealed class Par2RepairServiceCorruptSourceTests : IAsyncLifetime
             target.AsSpan(0, SliceSize).ToArray(),
             await ReadPatchAsync(release.Store, release.ContentSegmentIds[0]));
         var siblingBodies = release.Fake.BodyRequestCounts.Keys
-            .Where(id => id.Contains("extra-", StringComparison.Ordinal))
+            .Where(id => release.Files[0].Ids.Contains(id, StringComparer.Ordinal))
             .ToList();
         Assert.Equal(2, siblingBodies.Count);
-        Assert.All(siblingBodies, id => Assert.Equal(1, release.Fake.BodyRequestCounts[id]));
+        Assert.All(siblingBodies, id =>
+        {
+            Assert.True(release.Fake.BodyRequestCounts[id] >= 3);
+            Assert.Equal(release.Fake.BodyRequestCounts[id], release.Fake.CompletionCallbackCounts[id]);
+        });
     }
 
     [Fact]
@@ -458,6 +462,55 @@ public sealed class Par2RepairServiceCorruptSourceTests : IAsyncLifetime
         Assert.False(release.Store.Contains(release.ContentSegmentIds[2]));
     }
 
+    [Fact]
+    public async Task DamagePersistenceFailure_DoesNotInvalidatePublishedRepair()
+    {
+        var fileData = PatternBytes(SliceSize * 3, 0xCA);
+        await using var release = await SeedAsync(fileData, EqualSegments(3), [0u, 1u],
+            omitFromProvider: [0], corruptOnRead: [1]);
+        var previousStore = BlobStore.Current;
+        FailingDamageWriteStore? failingStore = null;
+        release.Service.BeforePatchPublicationForTests = _ =>
+        {
+            failingStore = new FailingDamageWriteStore(previousStore);
+            BlobStore.Use(failingStore);
+            return Task.CompletedTask;
+        };
+        try
+        {
+            Assert.Equal(Par2RepairOutcome.Repaired, await release.Service.TryPar2RepairAsync(release.Item,
+                [release.ContentSegmentIds[0]], CancellationToken.None));
+        }
+        finally { BlobStore.Use(previousStore); }
+
+        var job = await ReadJobAsync(release.Item.Id);
+        Assert.Equal(Par2RepairJob.RepairJobState.Succeeded, job.State);
+        Assert.Null(job.NextAttemptAt);
+        Assert.NotNull(failingStore);
+        Assert.True(failingStore.WriteCount > 0);
+        Assert.Equal(fileData.AsSpan(0, SliceSize).ToArray(), await ReadPatchAsync(release.Store, release.ContentSegmentIds[0]));
+        Assert.Equal(fileData.AsSpan(SliceSize, SliceSize).ToArray(), await ReadPatchAsync(release.Store, release.ContentSegmentIds[1]));
+    }
+
+    private sealed class FailingDamageWriteStore(IBlobStore inner) : IBlobStore
+    {
+        public int WriteCount { get; private set; }
+        public Task WriteBlob(Guid id, Stream stream, CancellationToken cancellationToken = default)
+        {
+            WriteCount++;
+            return Task.FromException(new IOException("Injected damage-record write failure."));
+        }
+        public Task WriteBlob<T>(Guid id, T blob, CancellationToken cancellationToken = default)
+        {
+            WriteCount++;
+            return Task.FromException(new IOException("Injected damage-record write failure."));
+        }
+        public Stream? ReadBlob(Guid id) => inner.ReadBlob(id);
+        public Task<T?> ReadBlob<T>(Guid id) => inner.ReadBlob<T>(id);
+        public bool Exists(Guid id) => inner.Exists(id);
+        public bool Delete(Guid id) => inner.Delete(id);
+    }
+
     private async Task<SeededRelease> SeedAsync(
         byte[] targetData,
         int[] targetSegmentSizes,
@@ -487,105 +540,24 @@ public sealed class Par2RepairServiceCorruptSourceTests : IAsyncLifetime
         cancelOnRead ??= [];
         extraFiles ??= [];
 
-        var token = Guid.NewGuid().ToString("N")[..8];
-        var targetName = $"target-{token}.bin";
+        var targetName = $"target-{Guid.NewGuid():N}.bin";
         var files = extraFiles
-            .Select(file => (file.FileName, file.Data))
-            .Append((targetName, targetData))
-            .ToList();
-        var hashOverrides = fileHashOverride is null
-            ? null
-            : new Dictionary<string, byte[]>(StringComparer.Ordinal) { [targetName] = fileHashOverride };
-        var (indexBytes, volumeBytes) = Par2TestEncoder.EncodeSet(
-            files, SliceSize, recoveryExponents, hashOverrides);
-
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        var rangesById = new Dictionary<string, LongRange>(StringComparer.Ordinal);
-        var nzbFiles = new List<(string Name, List<(string Id, int Bytes)> Segments)>();
-
-        foreach (var extra in extraFiles)
-        {
-            var (ids, ranges, parts) = Split(extra.Data, extra.Sizes, $"extra-{token}");
-            nzbFiles.Add((extra.FileName, ids.Zip(extra.Sizes, (id, size) => (id, size)).ToList()));
-            AddPayloads(payloads, rangesById, ids, parts, ranges);
-        }
-
-        var (contentIds, contentRanges, contentParts) = Split(targetData, targetSegmentSizes, $"tgt-{token}");
-        nzbFiles.Add((targetName, contentIds.Zip(targetSegmentSizes, (id, size) => (id, size)).ToList()));
-        AddPayloads(payloads, rangesById, contentIds, contentParts, contentRanges);
-
-        var indexId = $"aaa-index-{token}@test";
-        var volumeId = $"zzz-vol-{token}@test";
-        payloads[indexId] = indexBytes;
-        payloads[volumeId] = volumeBytes;
-        rangesById[indexId] = LongRange.FromStartAndSize(0, indexBytes.Length);
-        rangesById[volumeId] = LongRange.FromStartAndSize(0, volumeBytes.Length);
-        nzbFiles.Add(($"{targetName}.par2", [(indexId, indexBytes.Length)]));
-        nzbFiles.Add(($"{targetName}.vol00+{recoveryExponents.Length:00}.par2", [(volumeId, volumeBytes.Length)]));
-
-        var omit = omitFromProvider.Select(i => contentIds[i]).ToHashSet(StringComparer.Ordinal);
-        foreach (var id in omit)
-            payloads.Remove(id);
-
-        var corruptIds = corruptOnRead.Select(i => contentIds[i]).ToHashSet(StringComparer.Ordinal);
-        var cancelIds = cancelOnRead.Select(i => contentIds[i]).ToHashSet(StringComparer.Ordinal);
-
-        var fake = new FakeNntpClient(
-            payloads,
-            useCachedYencStreams: true,
-            segmentRanges: rangesById,
-            decodedStreamFactory: (id, bytes) =>
+            .Select(file => new Par2RepairTestReleaseBuilder.SourceFile(file.FileName, file.Data, file.Sizes))
+            .Append(new Par2RepairTestReleaseBuilder.SourceFile(targetName, targetData, targetSegmentSizes,
+                omitFromProvider, FileHashOverride: fileHashOverride)).ToArray();
+        return await new Par2RepairTestReleaseBuilder(_config, _configRoot).BuildAsync(files, recoveryExponents,
+            streamFactory: (fileIndex, segmentIndex, bytes) =>
             {
-                if (cancelIds.Contains(id))
+                if (fileIndex != files.Length - 1) return new MemoryStream(bytes, writable: false);
+                if (cancelOnRead.Contains(segmentIndex))
                     return new CancelOnReadStream(cancel ?? throw new InvalidOperationException("cancel CTS required"));
-                if (corruptIds.Contains(id))
-                    return new ThrowingReadStream(id);
+                if (corruptOnRead.Contains(segmentIndex))
+                    return new ThrowingReadStream("corrupt@test");
                 if (sourceReadStarted is not null
-                    && allowSourceRead is not null
-                    && contentIds.Contains(id, StringComparer.Ordinal))
+                    && allowSourceRead is not null)
                     return new GateOnFirstReadStream(bytes, sourceReadStarted, allowSourceRead);
                 return new MemoryStream(bytes, writable: false);
             });
-
-        var nzbXml = BuildNzbXml(nzbFiles);
-        var nzbBlobId = Guid.NewGuid();
-        await using (var nzbStream = new MemoryStream(Encoding.UTF8.GetBytes(nzbXml)))
-            await BlobStore.WriteBlob(nzbBlobId, nzbStream);
-
-        var fileBlobId = Guid.NewGuid();
-        var itemId = Guid.NewGuid();
-        await BlobStore.WriteBlob(fileBlobId, new DavNzbFile
-        {
-            Id = itemId,
-            SegmentIds = contentIds,
-            SegmentByteRanges = contentRanges,
-        });
-
-        var item = DavItem.New(
-            itemId,
-            DavItem.ContentFolder,
-            targetName,
-            fileSize: targetData.Length,
-            DavItem.ItemType.UsenetFile,
-            DavItem.ItemSubType.NzbFile,
-            releaseDate: DateTimeOffset.UtcNow.AddDays(-1),
-            lastHealthCheck: null,
-            historyItemId: null,
-            fileBlobId: fileBlobId,
-            nzbBlobId: nzbBlobId);
-
-        await using (var context = new DavDatabaseContext())
-        {
-            context.Items.Add(item);
-            await context.SaveChangesAsync();
-        }
-
-        var patchDir = Path.Join(_configRoot, "patches", token);
-        var store = new RepairPatchStore(patchDir, 32 * 1024 * 1024);
-        await store.EnsureCatalogLoadedAsync(CancellationToken.None);
-        var usenet = new UsenetStreamingClient(fake, store);
-        var service = new Par2RepairService(_config, usenet, store);
-        return new SeededRelease(item, contentIds, fake, store, service, usenet);
     }
 
     private static int[] EqualSegments(int count) => Enumerable.Repeat(SliceSize, count).ToArray();
@@ -599,61 +571,6 @@ public sealed class Par2RepairServiceCorruptSourceTests : IAsyncLifetime
     }
 
     private static byte[] Slice(byte[] data, int start, int count) => data.AsSpan(start, count).ToArray();
-
-    private static (string[] Ids, LongRange[] Ranges, byte[][] Parts) Split(
-        byte[] data, int[] sizes, string prefix)
-    {
-        var ids = new string[sizes.Length];
-        var ranges = new LongRange[sizes.Length];
-        var parts = new byte[sizes.Length][];
-        var offset = 0;
-        for (var i = 0; i < sizes.Length; i++)
-        {
-            ids[i] = $"{prefix}-{i}@test";
-            ranges[i] = LongRange.FromStartAndSize(offset, sizes[i]);
-            parts[i] = data.AsSpan(offset, sizes[i]).ToArray();
-            offset += sizes[i];
-        }
-
-        if (offset != data.Length)
-            throw new ArgumentException("Segment sizes must cover the file.");
-        return (ids, ranges, parts);
-    }
-
-    private static void AddPayloads(
-        Dictionary<string, byte[]> payloads,
-        Dictionary<string, LongRange> rangesById,
-        string[] ids,
-        byte[][] parts,
-        LongRange[] ranges)
-    {
-        for (var i = 0; i < ids.Length; i++)
-        {
-            payloads[ids[i]] = parts[i];
-            rangesById[ids[i]] = ranges[i];
-        }
-    }
-
-    private static string BuildNzbXml(IReadOnlyList<(string Name, List<(string Id, int Bytes)> Segments)> files)
-    {
-        var xml = new StringBuilder();
-        xml.Append("""<?xml version="1.0" encoding="utf-8"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">""");
-        foreach (var (name, segments) in files)
-        {
-            xml.Append("<file subject=\"&quot;").Append(name).Append("&quot; yEnc\">");
-            xml.Append("<segments>");
-            for (var i = 0; i < segments.Count; i++)
-            {
-                xml.Append("<segment bytes=\"").Append(segments[i].Bytes).Append("\" number=\"")
-                    .Append(i + 1).Append("\">").Append(segments[i].Id).Append("</segment>");
-            }
-
-            xml.Append("</segments></file>");
-        }
-
-        xml.Append("</nzb>");
-        return xml.ToString();
-    }
 
     private static async Task<byte[]> ReadPatchAsync(RepairPatchStore store, string segmentId)
     {
@@ -674,27 +591,6 @@ public sealed class Par2RepairServiceCorruptSourceTests : IAsyncLifetime
     {
         await using var context = new DavDatabaseContext();
         return await context.Par2RepairJobs.SingleAsync(x => x.DavItemId == itemId);
-    }
-
-    private sealed class SeededRelease(
-        DavItem item,
-        string[] contentSegmentIds,
-        FakeNntpClient fake,
-        RepairPatchStore store,
-        Par2RepairService service,
-        UsenetStreamingClient usenet) : IAsyncDisposable
-    {
-        public DavItem Item { get; } = item;
-        public string[] ContentSegmentIds { get; } = contentSegmentIds;
-        public FakeNntpClient Fake { get; } = fake;
-        public RepairPatchStore Store { get; } = store;
-        public Par2RepairService Service { get; } = service;
-
-        public ValueTask DisposeAsync()
-        {
-            usenet.Dispose();
-            return ValueTask.CompletedTask;
-        }
     }
 
     private sealed class ThrowingReadStream(string segmentId) : MemoryStream(new byte[64])

@@ -41,7 +41,7 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
     private int _catalogDegraded;
     private long _lastWriteWarningTicks;
 
-    private static readonly JsonSerializerOptions HeaderJsonOptions = new() { IncludeFields = true };
+    internal static readonly JsonSerializerOptions HeaderJsonOptions = new() { IncludeFields = true };
 
     public SegmentCacheNntpClient(
         INntpClient inner,
@@ -131,16 +131,6 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
         }
 
         return await base.TryGetLocalDecodedBodyAsync(segmentId, ct).ConfigureAwait(false);
-    }
-
-    public override async Task<UsenetExclusiveConnection> AcquireExclusiveConnectionAsync(
-        string segmentId, CancellationToken ct)
-    {
-        if (MultiProviderNntpClient.AttributionContext.Value == null
-            && IsCatalogReady
-            && _index.ContainsKey(Hash(segmentId)))
-            return new UsenetExclusiveConnection(onConnectionReadyAgain: null);
-        return await base.AcquireExclusiveConnectionAsync(segmentId, ct).ConfigureAwait(false);
     }
 
     public override async Task<UsenetDecodedBodyResponse> DecodedBodyAsync(
