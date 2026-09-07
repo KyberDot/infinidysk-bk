@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database;
 
@@ -10,9 +11,11 @@ using NzbWebDAV.Database;
 namespace NzbWebDAV.Database.MetricsMigrations
 {
     [DbContext(typeof(MetricsDbContext))]
-    partial class MetricsDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260904233100_AddClientArticleCounters")]
+    partial class AddClientArticleCounters
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -263,9 +266,6 @@ namespace NzbWebDAV.Database.MetricsMigrations
                     b.Property<long>("ClientArticles")
                         .HasColumnType("INTEGER");
 
-                    b.Property<bool>("ClientArticlesFinalized")
-                        .HasColumnType("INTEGER");
-
                     b.Property<long>("Errors")
                         .HasColumnType("INTEGER");
 
@@ -399,9 +399,6 @@ namespace NzbWebDAV.Database.MetricsMigrations
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("ClientArticles")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("ClientArticlesFinalized")
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("Errors")
