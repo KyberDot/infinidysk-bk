@@ -1,5 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Data.Common;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Config;
@@ -19,13 +21,19 @@ namespace NzbWebDAV.Tasks;
 public class RemoveUnlinkedFilesTask : BaseTask
 {
     private static readonly TimeSpan DefaultProgressHeartbeatInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultPreviewLifetime = TimeSpan.FromMinutes(15);
+    private static readonly object PreviewLock = new();
     private static List<string> _allRemovedPaths = [];
+    private static PreviewApproval? _previewApproval;
     private readonly ConfigManager _configManager;
     private readonly WebsocketManager _websocketManager;
     private readonly bool _isDryRun;
     private readonly Func<DavDatabaseContext>? _createContext;
+    private readonly string? _previewToken;
+    private readonly TimeSpan _previewLifetime;
     private readonly TimeSpan _progressHeartbeatInterval;
     private readonly Action<string>? _progressObserver;
+    private readonly Func<Task>? _beforePreviewApproval;
     private ProgressHeartbeat? _progressHeartbeat;
 
     internal record UnlinkedItemInfo(string Id, int Type, string Path);
@@ -58,8 +66,9 @@ public class RemoveUnlinkedFilesTask : BaseTask
     public RemoveUnlinkedFilesTask(
         ConfigManager configManager,
         WebsocketManager websocketManager,
-        bool isDryRun)
-        : this(configManager, websocketManager, isDryRun, null)
+        bool isDryRun,
+        string? previewToken = null)
+        : this(configManager, websocketManager, isDryRun, null, previewToken)
     {
     }
 
@@ -68,16 +77,24 @@ public class RemoveUnlinkedFilesTask : BaseTask
         WebsocketManager websocketManager,
         bool isDryRun,
         Func<DavDatabaseContext>? createContext,
+        string? previewToken = null,
+        TimeSpan? previewLifetime = null,
         TimeSpan? progressHeartbeatInterval = null,
-        Action<string>? progressObserver = null)
+        Action<string>? progressObserver = null,
+        Func<Task>? beforePreviewApproval = null)
     {
         _configManager = configManager;
         _websocketManager = websocketManager;
         _isDryRun = isDryRun;
         _createContext = createContext;
+        _previewToken = previewToken;
+        _previewLifetime = previewLifetime ?? DefaultPreviewLifetime;
         _progressHeartbeatInterval = progressHeartbeatInterval ?? DefaultProgressHeartbeatInterval;
         _progressObserver = progressObserver;
+        _beforePreviewApproval = beforePreviewApproval;
     }
+
+    public string? IssuedPreviewToken { get; private set; }
 
     private DavDatabaseContext CreateContext() => DavDatabaseContexts.Create(_createContext);
 
@@ -158,6 +175,9 @@ public class RemoveUnlinkedFilesTask : BaseTask
             return;
         }
 
+        if (_isDryRun)
+            InvalidatePreviewApproval();
+
         // get linked file paths
         StartPhase("Scanning all linked files...");
         var startTime = DateTime.Now;
@@ -187,6 +207,7 @@ public class RemoveUnlinkedFilesTask : BaseTask
         // so 90% leaves wide headroom while still catching a broken scan.
         var deletableItems = await CountDeletableItems(startTime).ConfigureAwait(false);
         var extremeUnlinkedRatio = deletableItems > 0 && unlinkedItems > deletableItems * 0.9;
+        string? previewFingerprint = null;
         if (extremeUnlinkedRatio)
         {
             var percent = 100.0 * unlinkedItems / deletableItems;
@@ -197,24 +218,44 @@ public class RemoveUnlinkedFilesTask : BaseTask
 
             if (!_isDryRun)
             {
-                _allRemovedPaths.Clear();
-                Complete($"Aborted: {detail} Cancelling to prevent accidental bulk deletion. " +
-                         "Run a dry-run to inspect if this is genuinely expected.");
-                return;
+                previewFingerprint = await ComputePreviewFingerprint(startTime).ConfigureAwait(false);
+                if (!TryValidatePreviewApproval(previewFingerprint, out var previewError))
+                {
+                    _allRemovedPaths.Clear();
+                    Complete($"Aborted: {detail} {previewError}");
+                    return;
+                }
             }
 
-            UpdatePhase($"Warning: {detail} A non-dry-run would abort.");
+            UpdatePhase($"Warning: {detail} Review the audit before cleanup.");
         }
 
         if (_isDryRun)
         {
             StartPhase("Identifying unlinked files...");
-            var identified = await DryRunIdentifyUnlinkedFiles(startTime).ConfigureAwait(false);
+            int identified;
+            if (extremeUnlinkedRatio)
+            {
+                await StagePreviewCandidates(startTime).ConfigureAwait(false);
+                var snapshot = await BuildStagedPreviewSnapshot().ConfigureAwait(false);
+                identified = snapshot.Count;
+                if (_beforePreviewApproval is not null)
+                    await _beforePreviewApproval().ConfigureAwait(false);
+                IssuedPreviewToken = IssuePreviewApproval(snapshot.Fingerprint, _previewLifetime);
+            }
+            else
+                identified = await DryRunIdentifyUnlinkedFiles(startTime).ConfigureAwait(false);
             Complete($"Done. Identified {identified} unlinked files.");
         }
         else
         {
-            var removed = await RemoveUnlinkedItems(startTime, unlinkedItems).ConfigureAwait(false);
+            if (extremeUnlinkedRatio)
+                ConsumePreviewApproval(_previewToken);
+            var removed = await RemoveUnlinkedItems(
+                    startTime,
+                    unlinkedItems,
+                    restrictToApprovedSnapshot: extremeUnlinkedRatio)
+                .ConfigureAwait(false);
             await RemoveEmptyDirectories(startTime).ConfigureAwait(false);
             Complete($"Done. Removed {removed} unlinked files.");
         }
@@ -485,7 +526,220 @@ public class RemoveUnlinkedFilesTask : BaseTask
         return count;
     }
 
-    private async Task<int> RemoveUnlinkedItems(DateTime createdBefore, int totalCount)
+    private async Task<string> ComputePreviewFingerprint(DateTime createdBefore)
+    {
+        await using var dbContext = CreateContext();
+        var usenetFileType = (int)DavItem.ItemType.UsenetFile;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendPreviewFingerprintHeader(hash);
+        var lastId = string.Empty;
+        while (true)
+        {
+            var candidates = await dbContext.Database
+                .SqlQuery<UnlinkedFileInfo>(
+                    $"""
+                     SELECT CAST("Id" AS TEXT) AS "Id", "Type", "Path", "Name",
+                            "GeneratedStrmOutputRoot", "GeneratedStrmPath", "GeneratedStrmTarget"
+                     FROM "DavItems"
+                     WHERE "Type" = {usenetFileType}
+                       AND "HistoryItemId" IS NULL
+                       AND "CreatedAt" < {CreateWallClockParameter(dbContext, createdBefore)}
+                       AND CAST("Id" AS TEXT) > {lastId}
+                       AND NOT EXISTS (
+                           SELECT 1 FROM TMP_LINKED_FILES t
+                           WHERE t.Id = "DavItems"."Id"
+                       )
+                     ORDER BY CAST("Id" AS TEXT)
+                     LIMIT 100
+                     """)
+                .ToListAsync()
+                .ConfigureAwait(false);
+
+            if (candidates.Count == 0)
+                break;
+
+            foreach (var item in candidates)
+                AppendPreviewFingerprintItem(hash, item);
+
+            lastId = candidates[^1].Id;
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private async Task StagePreviewCandidates(DateTime createdBefore)
+    {
+        await using var dbContext = CreateContext();
+        var usenetFileType = (int)DavItem.ItemType.UsenetFile;
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            DROP TABLE IF EXISTS TMP_APPROVED_UNLINKED_FILES;
+            CREATE TABLE TMP_APPROVED_UNLINKED_FILES (
+                Id TEXT NOT NULL PRIMARY KEY,
+                Type INTEGER NOT NULL,
+                Path TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                GeneratedStrmOutputRoot TEXT NULL,
+                GeneratedStrmPath TEXT NULL,
+                GeneratedStrmTarget TEXT NULL
+            );
+            """).ConfigureAwait(false);
+
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             INSERT INTO TMP_APPROVED_UNLINKED_FILES
+                 (Id, Type, Path, Name, GeneratedStrmOutputRoot, GeneratedStrmPath, GeneratedStrmTarget)
+             SELECT CAST("Id" AS TEXT), "Type", "Path", "Name",
+                    "GeneratedStrmOutputRoot", "GeneratedStrmPath", "GeneratedStrmTarget"
+             FROM "DavItems"
+             WHERE "Type" = {usenetFileType}
+               AND "HistoryItemId" IS NULL
+               AND "CreatedAt" < {CreateWallClockParameter(dbContext, createdBefore)}
+               AND NOT EXISTS (
+                   SELECT 1 FROM TMP_LINKED_FILES t
+                   WHERE t.Id = "DavItems"."Id"
+               )
+             """).ConfigureAwait(false);
+    }
+
+    private async Task<PreviewSnapshot> BuildStagedPreviewSnapshot()
+    {
+        _allRemovedPaths.Clear();
+        await using var dbContext = CreateContext();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendPreviewFingerprintHeader(hash);
+
+        var lastId = string.Empty;
+        var identified = 0;
+        while (true)
+        {
+            var candidates = await dbContext.Database
+                .SqlQuery<UnlinkedFileInfo>(
+                    $"""
+                     SELECT Id AS "Id", Type AS "Type", Path AS "Path", Name AS "Name",
+                            GeneratedStrmOutputRoot AS "GeneratedStrmOutputRoot",
+                            GeneratedStrmPath AS "GeneratedStrmPath",
+                            GeneratedStrmTarget AS "GeneratedStrmTarget"
+                     FROM TMP_APPROVED_UNLINKED_FILES
+                     WHERE Id > {lastId}
+                     ORDER BY Id
+                     LIMIT 100
+                     """)
+                .ToListAsync()
+                .ConfigureAwait(false);
+
+            if (candidates.Count == 0)
+                break;
+
+            foreach (var item in candidates)
+            {
+                AppendPreviewFingerprintItem(hash, item);
+                identified++;
+                _allRemovedPaths.Add(item.Path);
+                if (!string.IsNullOrWhiteSpace(item.GeneratedStrmPath))
+                    _allRemovedPaths.Add($"{item.GeneratedStrmPath} (strm sidecar of {item.Path})");
+            }
+
+            lastId = candidates[^1].Id;
+            UpdatePhase($"Identifying unlinked files...\nFound {identified}...");
+        }
+
+        return new PreviewSnapshot(Convert.ToHexString(hash.GetHashAndReset()), identified);
+    }
+
+    private void AppendPreviewFingerprintHeader(IncrementalHash hash)
+    {
+        AppendPreviewFingerprintValue(hash, _configManager.GetLibraryDir());
+        AppendPreviewFingerprintValue(hash, _configManager.GetRcloneMountDir());
+    }
+
+    private static void AppendPreviewFingerprintItem(IncrementalHash hash, UnlinkedFileInfo item)
+    {
+        AppendPreviewFingerprintValue(hash, item.Id);
+        AppendPreviewFingerprintValue(hash, item.Path);
+        AppendPreviewFingerprintValue(hash, item.Name);
+        AppendPreviewFingerprintValue(hash, item.GeneratedStrmOutputRoot);
+        AppendPreviewFingerprintValue(hash, item.GeneratedStrmPath);
+        AppendPreviewFingerprintValue(hash, item.GeneratedStrmTarget);
+    }
+
+    private static void AppendPreviewFingerprintValue(IncrementalHash hash, string? value)
+    {
+        hash.AppendData(Encoding.UTF8.GetBytes(value ?? "<null>"));
+        hash.AppendData([0]);
+    }
+
+    private static string IssuePreviewApproval(string fingerprint, TimeSpan previewLifetime)
+    {
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        lock (PreviewLock)
+        {
+            _previewApproval = new PreviewApproval(
+                token,
+                fingerprint,
+                DateTimeOffset.UtcNow + previewLifetime);
+        }
+
+        return token;
+    }
+
+    private bool TryValidatePreviewApproval(string fingerprint, out string reason)
+    {
+        if (string.IsNullOrWhiteSpace(_previewToken))
+        {
+            reason = "Run and review a fresh dry run before cleanup.";
+            return false;
+        }
+
+        lock (PreviewLock)
+        {
+            if (_previewApproval is null
+                || !_previewApproval.Token.FixedTimeEquals(_previewToken))
+            {
+                reason = "The dry-run approval is missing or was replaced; run the dry run again.";
+                return false;
+            }
+
+            if (_previewApproval.ExpiresAt <= DateTimeOffset.UtcNow)
+            {
+                reason = "The dry-run approval expired; run the dry run again.";
+                return false;
+            }
+
+            if (!string.Equals(_previewApproval.Fingerprint, fingerprint, StringComparison.Ordinal))
+            {
+                reason = "The orphan or library-link state changed after the dry run; review a new dry run.";
+                return false;
+            }
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private static void ConsumePreviewApproval(string? previewToken)
+    {
+        if (string.IsNullOrWhiteSpace(previewToken))
+            return;
+
+        lock (PreviewLock)
+        {
+            if (_previewApproval?.Token.FixedTimeEquals(previewToken) == true)
+                _previewApproval = null;
+        }
+    }
+
+    private static void InvalidatePreviewApproval()
+    {
+        lock (PreviewLock)
+            _previewApproval = null;
+    }
+
+    private async Task<int> RemoveUnlinkedItems(
+        DateTime createdBefore,
+        int totalCount,
+        bool restrictToApprovedSnapshot = false)
     {
         StartPhase("Removing unlinked items...");
         _allRemovedPaths.Clear();
@@ -497,8 +751,37 @@ public class RemoveUnlinkedFilesTask : BaseTask
         {
             // Select items to delete (batch of 100). t.Id on the left inherits NOCASE from
             // the TMP_LINKED_FILES PK so lowercase DavItems.Id still match uppercase links.
-            var itemsToDelete = await dbContext.Database
-                .SqlQuery<UnlinkedFileInfo>(
+            var itemsToDelete = restrictToApprovedSnapshot
+                ? await dbContext.Database
+                    .SqlQuery<UnlinkedFileInfo>(
+                        $"""
+                         SELECT a.Id AS "Id", a.Type AS "Type", a.Path AS "Path", a.Name AS "Name",
+                                a.GeneratedStrmOutputRoot AS "GeneratedStrmOutputRoot",
+                                a.GeneratedStrmPath AS "GeneratedStrmPath",
+                                a.GeneratedStrmTarget AS "GeneratedStrmTarget"
+                         FROM TMP_APPROVED_UNLINKED_FILES a
+                         INNER JOIN "DavItems" i ON CAST(i."Id" AS TEXT) = a.Id
+                         WHERE i."Type" = {usenetFileType}
+                           AND i."HistoryItemId" IS NULL
+                           AND i."CreatedAt" < {CreateWallClockParameter(dbContext, createdBefore)}
+                           AND i."Path" = a.Path
+                           AND i."Name" = a.Name
+                           AND (i."GeneratedStrmOutputRoot" = a.GeneratedStrmOutputRoot OR
+                                (i."GeneratedStrmOutputRoot" IS NULL AND a.GeneratedStrmOutputRoot IS NULL))
+                           AND (i."GeneratedStrmPath" = a.GeneratedStrmPath OR
+                                (i."GeneratedStrmPath" IS NULL AND a.GeneratedStrmPath IS NULL))
+                           AND (i."GeneratedStrmTarget" = a.GeneratedStrmTarget OR
+                                (i."GeneratedStrmTarget" IS NULL AND a.GeneratedStrmTarget IS NULL))
+                           AND NOT EXISTS (
+                               SELECT 1 FROM TMP_LINKED_FILES t
+                               WHERE t.Id = i."Id"
+                           )
+                         LIMIT 100
+                         """)
+                    .ToListAsync()
+                    .ConfigureAwait(false)
+                : await dbContext.Database
+                    .SqlQuery<UnlinkedFileInfo>(
                     $"""
                      SELECT CAST("Id" AS TEXT) AS "Id", "Type", "Path", "Name",
                             "GeneratedStrmOutputRoot", "GeneratedStrmPath", "GeneratedStrmTarget"
@@ -512,8 +795,8 @@ public class RemoveUnlinkedFilesTask : BaseTask
                        )
                      LIMIT 100
                      """)
-                .ToListAsync()
-                .ConfigureAwait(false);
+                    .ToListAsync()
+                    .ConfigureAwait(false);
 
             // If there are no more items to delete, we're done.
             if (itemsToDelete.Count == 0)
@@ -832,5 +1115,17 @@ public class RemoveUnlinkedFilesTask : BaseTask
         }
     }
 
-    internal static void ClearAuditPathsForTests() => _allRemovedPaths = [];
+    internal static void ClearAuditPathsForTests()
+    {
+        _allRemovedPaths = [];
+        lock (PreviewLock)
+            _previewApproval = null;
+    }
+
+    private sealed record PreviewApproval(
+        string Token,
+        string Fingerprint,
+        DateTimeOffset ExpiresAt);
+
+    private sealed record PreviewSnapshot(string Fingerprint, int Count);
 }
