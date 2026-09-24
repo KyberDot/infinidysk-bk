@@ -93,6 +93,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     private readonly PrioritizedSemaphore _gate;
     private readonly SemaphoreSlim _handshakeGate = new(MaxConcurrentHandshakes, MaxConcurrentHandshakes);
     private readonly CancellationTokenSource _sweepCts = new();
+    private readonly CancellationTokenSource _disposeCts = new();
     private readonly Task _sweeperTask; // keeps timer alive
     private readonly Lock _lifecycleLock = new();
     private TaskCompletionSource _connectionAvailability = CreateAvailabilitySignal();
@@ -101,6 +102,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     private int _pendingConnectionCreations;
     private int _handshakeOperations;
     private int _disposed; // 0 == false, 1 == true
+    private int _retired;
     private int _effectiveMaxConnections;
     private int? _learnedConnectionLimit;
     private long _nextReplacementHandshakeAtMs;
@@ -198,7 +200,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         if (openTimeout is not null
             && !callerCancellationToken.IsCancellationRequested
-            && !_sweepCts.IsCancellationRequested)
+            && !_disposeCts.IsCancellationRequested)
         {
             throw new ConnectionOpenTimeoutException(
                 _connectionOpenProvider,
@@ -388,12 +390,12 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             : null;
         acquisition ??= ownedAcquisition;
         using var waiting = acquisitionWaitToken is { } suppliedWaitToken
-            ? CancellationTokenSource.CreateLinkedTokenSource(suppliedWaitToken, _sweepCts.Token)
+            ? CancellationTokenSource.CreateLinkedTokenSource(suppliedWaitToken, _disposeCts.Token)
             : acquisition is { } admitted
                 ? CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken, _sweepCts.Token, admitted.CircuitCancellationToken)
+                    cancellationToken, _disposeCts.Token, admitted.CircuitCancellationToken)
                 : CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken, _sweepCts.Token);
+                    cancellationToken, _disposeCts.Token);
         var waitToken = waiting.Token;
         if (acquisitionWaitToken is null
             && acquisitionWaitTimeout is { } waitTimeout
@@ -411,7 +413,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         void ThrowIfAcquisitionWaitCancelled(string phase)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            _sweepCts.Token.ThrowIfCancellationRequested();
+            _disposeCts.Token.ThrowIfCancellationRequested();
             acquisition?.ThrowIfRejected();
             if (waitToken.IsCancellationRequested && acquisitionWaitTimeout is { } timeout)
                 throw new ProviderTransferAdmissionTimeoutException(
@@ -612,7 +614,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 openPhase = "Factory";
                 factoryStarted = Stopwatch.GetTimestamp();
                 factoryLifetime = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken, _sweepCts.Token);
+                    cancellationToken, _disposeCts.Token);
                 if (openTimeout is { } timeout)
                     factoryLifetime.CancelAfter(timeout);
                 factoryTask = _factory(factoryLifetime.Token).AsTask();
@@ -634,7 +636,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 #pragma warning disable CA2025 // The late-completion observer retains cleanup ownership until the factory stops.
                     _ = ObserveLateFactoryCompletionAsync(
                         factoryTask, creationReserved, handshakeOwned: true,
-                        cancellationReason: _sweepCts.IsCancellationRequested ? "pool shutdown"
+                        cancellationReason: _disposeCts.IsCancellationRequested ? "pool shutdown"
                             : cancellationToken.IsCancellationRequested ? "caller cancellation"
                             : "connection-open deadline expired");
 #pragma warning restore CA2025
@@ -898,7 +900,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 #pragma warning disable CA2025 // The late-completion observer retains cleanup ownership until the factory stops.
                         _ = ObserveLateFactoryCompletionAsync(
                             factoryTask, creationReserved: true, handshakeOwned: true,
-                            cancellationReason: _sweepCts.IsCancellationRequested ? "pool shutdown"
+                            cancellationReason: _disposeCts.IsCancellationRequested ? "pool shutdown"
                                 : cancellationToken.IsCancellationRequested ? "caller cancellation"
                                 : "connection-open deadline expired");
 #pragma warning restore CA2025
@@ -1607,6 +1609,12 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             d.Dispose();
     }
 
+    internal void Retire()
+    {
+        if (Interlocked.Exchange(ref _retired, 1) == 0)
+            _sweepCts.Cancel();
+    }
+
     /* -------------------------- IAsyncDisposable ---------------------------------- */
 
     public async ValueTask DisposeAsync()
@@ -1622,6 +1630,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             OnConnectionPoolChanged = null;
         }
 
+        await _disposeCts.CancelAsync().ConfigureAwait(false);
         await _sweepCts.CancelAsync().ConfigureAwait(false);
 
         try
@@ -1640,6 +1649,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         lock (_lifecycleLock)
         {
             _sweepCts.Dispose();
+            _disposeCts.Dispose();
             _gate.Dispose();
             if (Volatile.Read(ref _handshakeOperations) == 0)
                 _handshakeGate.Dispose();
