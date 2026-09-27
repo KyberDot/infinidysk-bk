@@ -347,6 +347,12 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                 if (_benchmarkGate.IsPaused || !_configManager.IsRepairJobEnabled())
                     return HealthCheckRefillOutcome.Blocked;
 
+                // Every check would fail at its first STAT, so selecting a candidate only
+                // pays for an ordered scan of the library to defer one item. Stay idle
+                // until a provider is enabled instead of walking the library a file at a time.
+                if (!HasEnabledUsenetProvider())
+                    return HealthCheckRefillOutcome.Blocked;
+
                 var admission = _healthWorkSchedule?.Evaluate(_timeProvider.GetUtcNow())
                     ?? new HealthWorkAdmission(
                         ChecksOpen: true,
@@ -422,6 +428,10 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             _workerAdmissionGate.Release();
         }
     }
+
+    private bool HasEnabledUsenetProvider() =>
+        _configManager.GetUsenetProviderConfig().Providers
+            .Any(provider => provider.Type != ProviderType.Disabled);
 
     private bool TryStartWorker(Guid id, CancellationToken ct)
     {
